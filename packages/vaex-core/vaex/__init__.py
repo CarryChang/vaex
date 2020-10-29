@@ -34,6 +34,7 @@ Follow the tutorial at https://docs.vaex.io/en/latest/tutorial.html to learn how
 """  # -*- coding: utf-8 -*-
 from __future__ import print_function
 import glob
+import re
 import six
 
 import vaex.dataframe
@@ -63,17 +64,7 @@ except:
     print("version file not found, please run git/hooks/post-commit or git/hooks/post-checkout and/or install them as hooks (see git/README)", file=sys.stderr)
     raise
 
-__version__ = version.versionstring
-# __pre_release_name__ = version.pre_release
-__version_tuple__ = version.versiontuple
-__program_name__ = "vaex"
-# __version_name__ = version.versiontring
-# __release_name_ = version.versiontring[:]
-# __clean_release__ = "%d.%d.%d" % (__version_tuple__)
-__full_name__ = __program_name__ + "-" + __version__
-# __clean_name__ =  __program_name__ + "-" + __clean_release__
-
-__build_name__ = __full_name__ + "-" + version.osname
+__version__ = version.get_versions()
 
 
 def app(*args, **kwargs):
@@ -100,20 +91,22 @@ def app(*args, **kwargs):
     return vaex.ui.main.VaexApp()
 
 
-def _convert_name(filenames, shuffle=False):
-    '''Convert a filename (or list of) to a filename with .hdf5 and optionally a -shuffle suffix'''
+def _convert_name(filenames, shuffle=False, suffix=None):
+    '''Convert a filename (or list of) to a filename with .hdf5 and optionally a -shuffle or other suffix'''
     if not isinstance(filenames, (list, tuple)):
         filenames = [filenames]
     base = filenames[0]
     if shuffle:
         base += '-shuffle'
+    if suffix:
+        base += suffix
     if len(filenames) > 1:
         return base + "_and_{}_more.hdf5".format(len(filenames)-1)
     else:
         return base + ".hdf5"
 
 
-def open(path, convert=False, shuffle=False, copy_index=True, *args, **kwargs):
+def open(path, convert=False, shuffle=False, copy_index=False, *args, **kwargs):
     """Open a DataFrame from file given by path.
 
     Example:
@@ -127,12 +120,12 @@ def open(path, convert=False, shuffle=False, copy_index=True, *args, **kwargs):
     :param args: extra arguments for file readers that need it
     :param kwargs: extra keyword arguments
     :param bool copy_index: copy index when source is read via pandas
-    :return: return a DataFrame on succes, otherwise None
+    :return: return a DataFrame on success, otherwise None
     :rtype: DataFrame
 
     S3 support:
 
-    Vaex supports streaming in hdf5 files from Amazon AWS object storage S3.
+    Vaex supports streaming of hdf5 files from Amazon AWS object storage S3.
     Files are by default cached in $HOME/.vaex/file-cache/s3 such that successive access
     is as fast as native disk access. The following url parameters control S3 options:
 
@@ -148,12 +141,25 @@ def open(path, convert=False, shuffle=False, copy_index=True, *args, **kwargs):
     >>> df = vaex.open('s3://vaex/taxi/yellow_taxi_2015_f32s.hdf5', anon=True)  # Note that anon is a boolean, not the string 'true'
     >>> df = vaex.open('s3://mybucket/path/to/file.hdf5?profile_name=myprofile')
 
+    GCS support:
+    Vaex supports streaming of hdf5 files from Google Cloud Storage.
+    Files are by default cached in $HOME/.vaex/file-cache/gs such that successive access
+    is as fast as native disk access. The following url parameters control GCS options:
+     * token: Authentication method for GCP. Use 'anon' for annonymous access. See https://gcsfs.readthedocs.io/en/latest/index.html#credentials for more details.
+     * use_cache: Use the disk cache or not, only set to false if the data should be accessed once. (Allowed values are: true,True,1,false,False,0).
+     * project and other arguments are passed to :py:class:`gcsfs.core.GCSFileSystem`
+
+    Examples:
+
+    >>> df = vaex.open('gs://vaex-data/airlines/us_airline_data_1988_2019.hdf5?token=anon')
+    >>> df = vaex.open('gs://vaex-data/testing/xys.hdf5?token=anon&cache=False')
     """
     import vaex
     try:
         if path in aliases:
             path = aliases[path]
-        if path.startswith("http://") or path.startswith("ws://"):  # TODO: think about https and wss
+        if path.startswith("http://") or path.startswith("ws://") or \
+           path.startswith("vaex+http://") or path.startswith("vaex+ws://"):  # TODO: think about https and wss
             server, name = path.rsplit("/", 1)
             url = urlparse(path)
             if '?' in name:
@@ -166,12 +172,12 @@ def open(path, convert=False, shuffle=False, copy_index=True, *args, **kwargs):
             client = vaex.connect(server, **kwargs)
             return client[name]
         if path.startswith("cluster"):
-            import vaex.distributed
-            return vaex.distributed.open(path, *args, **kwargs)
+            import vaex.enterprise.distributed
+            return vaex.enterprise.distributed.open(path, *args, **kwargs)
         else:
             import vaex.file
             import glob
-            if isinstance(path, six.string_types):
+            if isinstance(path, str):
                 paths = [path]
             else:
                 paths = path
@@ -180,8 +186,10 @@ def open(path, convert=False, shuffle=False, copy_index=True, *args, **kwargs):
                 # TODO: can we do glob with s3?
                 if path.startswith('s3://'):
                     filenames.append(path)
+                elif path.startswith('gs://'):
+                    filenames.append(path)
                 else:
-                    # sort to get predicatable behaviour (useful for testing)
+                    # sort to get predictable behaviour (useful for testing)
                     filenames.extend(list(sorted(glob.glob(path))))
             ds = None
             if len(filenames) == 0:
@@ -195,23 +203,19 @@ def open(path, convert=False, shuffle=False, copy_index=True, *args, **kwargs):
                     naked_path = naked_path[:naked_path.index('?')]
                 ext = os.path.splitext(naked_path)[1]
                 if os.path.exists(filename_hdf5) and convert:  # also check mtime?
-                    if convert:
-                        ds = vaex.file.open(filename_hdf5)
-                    else:
-                        ds = vaex.file.open(filename_hdf5, *args, **kwargs)
+                    ds = vaex.file.open(filename_hdf5)
                 else:
                     if ext == '.csv' or naked_path.endswith(".csv.bz2"):  # special support for csv.. should probably approach it a different way
-                        ds = from_csv(path, copy_index=copy_index, **kwargs)
+                        csv_convert = filename_hdf5 if convert else False
+                        ds = from_csv(path, copy_index=copy_index, convert=csv_convert, **kwargs)
                     else:
                         ds = vaex.file.open(path, *args, **kwargs)
-                    if convert and ds:
-                        ds.export_hdf5(filename_hdf5, shuffle=shuffle)
-                        ds = vaex.file.open(filename_hdf5) # argument were meant for pandas?
+                        if convert and ds:
+                            ds.export_hdf5(filename_hdf5, shuffle=shuffle)
+                            ds = vaex.file.open(filename_hdf5)  # argument were meant for pandas?
                 if ds is None:
                     if os.path.exists(path):
                         raise IOError('Could not open file: {}, did you install vaex-hdf5? Is the format supported?'.format(path))
-                    if os.path.exists(path):
-                        raise IOError('Could not open file: {}, it does not exist?'.format(path))
             elif len(filenames) > 1:
                 if convert not in [True, False]:
                     filename_hdf5 = convert
@@ -222,13 +226,13 @@ def open(path, convert=False, shuffle=False, copy_index=True, *args, **kwargs):
                 else:
                     # with ProcessPoolExecutor() as executor:
                     # executor.submit(read_csv_and_convert, filenames, shuffle=shuffle, **kwargs)
-                    DataFrames = []
+                    dfs = []
                     for filename in filenames:
-                        DataFrames.append(open(filename, convert=bool(convert), shuffle=shuffle, **kwargs))
-                    ds = vaex.dataframe.DataFrameConcatenated(DataFrames)
-                if convert:
-                    ds.export_hdf5(filename_hdf5, shuffle=shuffle)
-                    ds = vaex.file.open(filename_hdf5, *args, **kwargs)
+                        dfs.append(open(filename, convert=bool(convert), shuffle=shuffle, **kwargs))
+                    ds = concat(dfs)
+                    if convert:
+                        ds.export_hdf5(filename_hdf5, shuffle=shuffle)
+                        ds = vaex.file.open(filename_hdf5)
 
         if ds is None:
             raise IOError('Unknown error opening: {}'.format(path))
@@ -249,7 +253,7 @@ def open_many(filenames):
         filename = filename.strip()
         if filename and filename[0] != "#":
             dfs.append(open(filename))
-    return vaex.dataframe.DataFrameConcatenated(dfs=dfs)
+    return concat(dfs)
 
 
 def from_samp(username=None, password=None):
@@ -266,7 +270,8 @@ def from_samp(username=None, password=None):
 def from_astropy_table(table):
     """Create a vaex DataFrame from an Astropy Table."""
     import vaex.file.other
-    return vaex.file.other.DatasetAstropyTable(table=table)
+    ds = vaex.file.other.DatasetAstropyTable(table=table)
+    return vaex.dataframe.DataFrameLocal(ds)
 
 
 def from_dict(data):
@@ -308,11 +313,7 @@ def from_items(*items):
     :rtype: DataFrame
 
     """
-    import numpy as np
-    df = vaex.dataframe.DataFrameArrays("array")
-    for name, array in items:
-        df.add_column(name, np.asanyarray(array))
-    return df
+    return from_dict(dict(items))
 
 
 def from_arrays(**arrays):
@@ -344,23 +345,29 @@ def from_arrays(**arrays):
     """
     import numpy as np
     import six
-    from .column import Column
-    df = vaex.dataframe.DataFrameArrays("array")
-    for name, array in arrays.items():
-        if isinstance(array, Column):
-            df.add_column(name, array)
-        else:
-            array = np.asanyarray(array)
-            df.add_column(name, array)
-    return df
+    dataset = vaex.dataset.DatasetArrays(arrays)
+    return vaex.dataframe.DataFrameLocal(dataset)
 
-def from_arrow_table(table):
+def from_arrow_table(table, as_numpy=True):
     """Creates a vaex DataFrame from an arrow Table.
 
+    :param as_numpy: Will lazily cast columns to a NumPy ndarray.
     :rtype: DataFrame
     """
-    from vaex_arrow.convert import vaex_df_from_arrow_table
-    return vaex_df_from_arrow_table(table=table)
+    from vaex.arrow.dataset import from_table
+    return from_table(table=table, as_numpy=as_numpy)
+
+
+def from_arrow_dataset(arrow_dataset) -> vaex.dataframe.DataFrame:
+    '''Create a DataFrame from an Apache Arrow dataset'''
+    import vaex.arrow.dataset
+    return from_dataset(vaex.arrow.dataset.DatasetArrow(arrow_dataset))
+
+
+def from_dataset(dataset: vaex.dataset.Dataset) -> vaex.dataframe.DataFrame:
+    '''Create a Vaex DataFrame from a Vaex Dataset'''
+    return vaex.dataframe.DataFrameLocal(dataset)
+
 
 def from_scalars(**kwargs):
     """Similar to from_arrays, but convenient for a DataFrame of length 1.
@@ -376,7 +383,7 @@ def from_scalars(**kwargs):
     return from_arrays(**{k: np.array([v]) for k, v in kwargs.items()})
 
 
-def from_pandas(df, name="pandas", copy_index=True, index_name="index"):
+def from_pandas(df, name="pandas", copy_index=False, index_name="index"):
     """Create an in memory DataFrame from a pandas DataFrame.
 
     :param: pandas.DataFrame df: Pandas DataFrame
@@ -391,26 +398,30 @@ def from_pandas(df, name="pandas", copy_index=True, index_name="index"):
     import six
     import pandas as pd
     import numpy as np
-    vaex_df = vaex.dataframe.DataFrameArrays(name)
+    import pyarrow as pa
+    columns = {}
 
     def add(name, column):
         values = column.values
-        if isinstance(values, pd.core.arrays.integer.IntegerArray):
+        # the first test is to support (partially) pandas 0.23
+        if hasattr(pd.core.arrays, 'integer') and isinstance(values, pd.core.arrays.integer.IntegerArray):
             values = np.ma.array(values._data, mask=values._mask)
+        elif hasattr(pd.core.arrays, 'StringArray') and isinstance(values, pd.core.arrays.StringArray):
+            values = pa.array(values)
         try:
-            vaex_df.add_column(name, values)
+            columns[name] = vaex.dataset.to_supported_array(values)
         except Exception as e:
             print("could not convert column %s, error: %r, will try to convert it to string" % (name, e))
             try:
                 values = values.astype("S")
-                vaex_df.add_column(name, values)
+                columns[name] = vaex.dataset.to_supported_array(values)
             except Exception as e:
                 print("Giving up column %s, error: %r" % (name, e))
     for name in df.columns:
-        add(name, df[name])
+        add(str(name), df[name])
     if copy_index:
         add(index_name, df.index)
-    return vaex_df
+    return from_dict(columns)
 
 
 def from_ascii(path, seperator=None, names=True, skip_lines=0, skip_after=0, **kwargs):
@@ -430,7 +441,7 @@ def from_ascii(path, seperator=None, names=True, skip_lines=0, skip_after=0, **k
     """
 
     import vaex.ext.readcol as rc
-    ds = vaex.dataframe.DataFrameArrays(path)
+    ds = vaex.dataframe.DataFrameLocal()
     if names not in [True, False]:
         namelist = names
         names = False
@@ -446,7 +457,7 @@ def from_ascii(path, seperator=None, names=True, skip_lines=0, skip_after=0, **k
     return ds
 
 
-def from_json(path_or_buffer, orient=None, precise_float=False, lines=False, copy_index=True, **kwargs):
+def from_json(path_or_buffer, orient=None, precise_float=False, lines=False, copy_index=False, **kwargs):
     """ A method to read a JSON file using pandas, and convert to a DataFrame directly.
 
     :param str path_or_buffer: a valid JSON string or file-like, default: None
@@ -474,13 +485,100 @@ def from_json(path_or_buffer, orient=None, precise_float=False, lines=False, cop
                        copy_index=copy_index)
 
 
-def from_csv(filename_or_buffer, copy_index=True, **kwargs):
-    """Shortcut to read a csv file using pandas and convert to a DataFrame directly.
-
-    :rtype: DataFrame
+def from_csv(filename_or_buffer, copy_index=False, chunk_size=None, convert=False, **kwargs):
     """
+    Read a CSV file as a DataFrame, and optionally convert to an hdf5 file.
+
+    :param str or file filename_or_buffer: CSV file path or file-like
+    :param bool copy_index: copy index when source is read via Pandas
+    :param int chunk_size: if the CSV file is too big to fit in the memory this parameter can be used to read
+        CSV file in chunks. For example:
+
+        >>> import vaex
+        >>> for i, df in enumerate(vaex.from_csv('taxi.csv', chunk_size=100_000)):
+        >>>     df = df[df.passenger_count < 6]
+        >>>     df.export_hdf5(f'taxi_{i:02}.hdf5')
+
+    :param bool or str convert: convert files to an hdf5 file for optimization, can also be a path. The CSV
+        file will be read in chunks: either using the provided chunk_size argument, or a default size. Each chunk will
+        be saved as a separate hdf5 file, then all of them will be combined into one hdf5 file. So for a big CSV file
+        you will need at least double of extra space on the disk. Default chunk_size for converting is 5 million rows,
+        which corresponds to around 1Gb memory on an example of NYC Taxi dataset.
+    :param kwargs: extra keyword arguments, currently passed to Pandas read_csv function, but the implementation might
+        change in future versions.
+    :returns: DataFrame
+    """
+    if not convert:
+        return _from_csv_read(filename_or_buffer=filename_or_buffer, copy_index=copy_index,
+                              chunk_size=chunk_size, **kwargs)
+    else:
+        if chunk_size is None:
+            # make it memory efficient by default
+            chunk_size = 5_000_000
+        return _from_csv_convert_and_read(filename_or_buffer=filename_or_buffer, copy_index=copy_index,
+                                          maybe_convert_path=convert, chunk_size=chunk_size, **kwargs)
+
+
+def _from_csv_read(filename_or_buffer, copy_index, chunk_size, **kwargs):
     import pandas as pd
-    return from_pandas(pd.read_csv(filename_or_buffer, **kwargs), copy_index=copy_index)
+    if not chunk_size:
+        full_df = pd.read_csv(filename_or_buffer, **kwargs)
+        return from_pandas(full_df, copy_index=copy_index)
+    else:
+        def iterator():
+            chunk_iterator = pd.read_csv(filename_or_buffer, chunksize=chunk_size, **kwargs)
+            for chunk_df in chunk_iterator:
+                yield from_pandas(chunk_df, copy_index=copy_index)
+        return iterator()
+
+
+def _from_csv_convert_and_read(filename_or_buffer, copy_index, maybe_convert_path, chunk_size, **kwargs):
+    # figure out the CSV file path
+    if isinstance(filename_or_buffer, str):
+        csv_path = filename_or_buffer
+    elif isinstance(maybe_convert_path, str):
+        csv_path = re.sub(r'\.hdf5$', '', str(maybe_convert_path), flags=re.IGNORECASE)
+    else:
+        raise ValueError('Cannot derive filename to use for converted HDF5 file, '
+                         'please specify it using convert="my.csv.hdf5"')
+
+    # reuse a previously converted HDF5 file
+    import vaex.file
+    combined_hdf5 = _convert_name(csv_path)
+    if os.path.exists(combined_hdf5):
+        return vaex.file.open(combined_hdf5)
+
+    # convert CSV chunks to separate HDF5 files
+    import pandas as pd
+    converted_paths = []
+    csv_reader = pd.read_csv(filename_or_buffer, chunksize=chunk_size, **kwargs)
+    for i, df_pandas in enumerate(csv_reader):
+        df = from_pandas(df_pandas, copy_index=copy_index)
+        filename_hdf5 = _convert_name(csv_path, suffix='_chunk%d' % i)
+        df.export_hdf5(filename_hdf5, shuffle=False)
+        converted_paths.append(filename_hdf5)
+        logger.info('saved chunk #%d to %s' % (i, filename_hdf5))
+
+    # combine chunks into one HDF5 file
+    if len(converted_paths) == 1:
+        # no need to merge several HDF5 files
+        os.rename(converted_paths[0], combined_hdf5)
+    else:
+        logger.info('converting %d chunks into single HDF5 file %s' % (len(converted_paths), combined_hdf5))
+        dfs = [vaex.file.open(p) for p in converted_paths]
+        df_combined = vaex.concat(dfs)
+        df_combined.export_hdf5(combined_hdf5, shuffle=False)
+
+        logger.info('deleting %d chunk files' % len(converted_paths))
+        for df, df_path in zip(dfs, converted_paths):
+            try:
+                df.close()
+                os.remove(df_path)
+            except Exception as e:
+                logger.error('Could not close or delete intermediate hdf5 file %s used to convert %s to hdf5: %s' % (
+                    df_path, csv_path, e))
+
+    return vaex.file.open(combined_hdf5)
 
 
 def read_csv(filepath_or_buffer, **kwargs):
@@ -488,7 +586,7 @@ def read_csv(filepath_or_buffer, **kwargs):
     return from_csv(filepath_or_buffer, **kwargs)
 
 
-def read_csv_and_convert(path, shuffle=False, copy_index=True, **kwargs):
+def read_csv_and_convert(path, shuffle=False, copy_index=False, **kwargs):
     '''Convert a path (or glob pattern) to a single hdf5 file, will open the hdf5 file if exists.
 
     Example:
@@ -497,7 +595,7 @@ def read_csv_and_convert(path, shuffle=False, copy_index=True, **kwargs):
 
     :param str path: path of file or glob pattern for multiple files
     :param bool shuffle: shuffle DataFrame when converting to hdf5
-    :param bool copy_index: by default pandas will create an index (row number), set to false if you want to drop that
+    :param bool copy_index: by default pandas will create an index (row number), set to true if you want to include this as a column.
     :param kwargs: parameters passed to pandas' read_cvs
 
     '''
@@ -551,16 +649,13 @@ def connect(url, **kwargs):
     from vaex.server import connect
     return connect(url, **kwargs)
 
-def example(download=True):
+
+def example():
     """Returns an example DataFrame which comes with vaex for testing/learning purposes.
 
     :rtype: DataFrame
     """
-    from . import utils
-    path = utils.get_data_file("helmi-dezeeuw-2000-10p.hdf5")
-    if path is None and download:
-        return vaex.datasets.helmi_de_zeeuw_10percent.fetch()
-    return open(path) if path else None
+    return vaex.datasets.helmi_de_zeeuw_10percent.fetch()
 
 
 def zeldovich(dim=2, N=256, n=-2.5, t=None, scale=1, seed=None):
@@ -602,8 +697,13 @@ def set_log_level_off():
 
 format = "%(levelname)s:%(threadName)s:%(name)s:%(message)s"
 logging.basicConfig(level=logging.INFO, format=format)
-# logging.basicConfig(level=logging.DEBUG)
-set_log_level_warning()
+DEBUG_MODE = bool(os.environ.get('VAEX_DEBUG', ''))
+if DEBUG_MODE:
+    logging.basicConfig(level=logging.DEBUG)
+    set_log_level_debug()
+else:
+    # logging.basicConfig(level=logging.DEBUG)
+    set_log_level_warning()
 
 import_script = os.path.expanduser("~/.vaex/vaex_import.py")
 if os.path.exists(import_script):
@@ -702,6 +802,9 @@ for entry in pkg_resources.iter_entry_points(group='vaex.dataframe.accessor'):
 
 
 for entry in pkg_resources.iter_entry_points(group='vaex.plugin'):
+    if entry.module_name == 'vaex_arrow.opener':
+        # if vaex_arrow package is installed, we ignore it
+        continue
     logger.debug('adding vaex plugin: ' + entry.name)
     try:
         add_namespace = entry.load()
@@ -710,13 +813,13 @@ for entry in pkg_resources.iter_entry_points(group='vaex.plugin'):
         logger.exception('issue loading ' + entry.name)
 
 
-def concat(dfs):
+def concat(dfs, resolver='flexible') -> vaex.dataframe.DataFrame:
     '''Concatenate a list of DataFrames.
 
-    :rtype: DataFrame
+    :param resolver: How to resolve schema conflicts, see :meth:`DataFrame.concat`.
     '''
-    ds = reduce((lambda x, y: x.concat(y)), dfs)
-    return ds
+    df, *tail = dfs
+    return df.concat(*tail, resolver=resolver)
 
 def vrange(start, stop, step=1, dtype='f8'):
     """Creates a virtual column which is the equivalent of numpy.arange, but uses 0 memory"""
@@ -724,6 +827,5 @@ def vrange(start, stop, step=1, dtype='f8'):
     return ColumnVirtualRange(start, stop, step, dtype)
 
 def string_column(strings):
-    from vaex_arrow.convert import column_from_arrow_array
     import pyarrow as pa
-    return column_from_arrow_array(pa.array(strings))
+    return pa.array(strings)

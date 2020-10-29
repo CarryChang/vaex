@@ -12,78 +12,83 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       max-parallel: 10
       matrix:
         os: [ubuntu-latest, windows-latest, macOS-latest]
-        python-version: [3.6, 3.7]
+        python-version: [3.6, 3.7, 3.8]
+        exclude:
+        # windows + conda + py38 doesn't work yet (dependency issue)
+        - os: windows-latest
+          python-version: 3.8
 
     steps:
     - uses: actions/checkout@v1
       with:
         submodules: true
+    - uses: actions/checkout@v2
+      if: ${{ (github.event.pull_request.head.repo.full_name == 'vaexio/vaex') && (matrix.os == 'linux-latest') }}
+      with:
+        repository: vaexio/vaex-enterprise
+        token: ${{ secrets.PAT_PULL_ENTERPRISE }}
+        path: vaex-enterprise
     - name: Install conda with Python ${{ matrix.python-version }}
-      uses: s-weigand/setup-conda@master
+      uses: s-weigand/setup-conda@v1
       with:
         python-version: ${{ matrix.python-version }}
         conda-channels: anaconda, conda-forge
-    # - name: Set up Python ${{ matrix.python-version }}
-    #   uses: actions/setup-python@v1
-    #   with:
-    # - name: Set conda root as output
-    #   shell: bash
-    #   run: echo "::set-env name=CONDA::$(echo $CONDA)"
-    # - name: Conda env cache
-    #   id: cache-conda-env
-    #   uses: actions/cache@v1
-    #   with:
-    #     path: ${{ env.CONDA }}/envs/vaex
-    #     key: conda-env-${{ runner.OS }}-${{ matrix.python-version }}-v1
-    - name: Create env
-      # if: steps.cache-conda-env.outputs.cache-hit != 'true'
-      run: |
-        conda create -q -n vaex -c conda-forge python=${{ matrix.python-version }} numpy scipy pyqt matplotlib pyopengl h5py numexpr astropy tornado cython runipy pandas pytest numba pyarrow graphviz python-graphviz pcre catboost plotly notebook
-    # - name: Restoring cached env
-    #   if: steps.cache-conda-env.outputs.cache-hit == 'true'
-    #   run: |
-    #     source activate vaex
-    #     conda install -c conda-forge matplotlib qt arrow-cpp pyarrow astropy
-    - name: Add conda to path
+    # cannot use mamba on windows, see https://github.com/TheSnakePit/mamba/issues/249 for libssh2+mambba issue
+    - name: Create env (with mamba)
+      if: matrix.os != 'windows-latest'
       shell: bash
       run: |
-        conda init --all
-        echo ::add-path::$CONDA/envs/vaex/bin
-    - name: Fix python-dateutil/botocore version conflict
-      if: matrix.os != 'windows-latest'
-      run: |
-        pip install python-dateutil==2.8.0  # botocore caps dateutil leading to issues
-    - name: Fix python-dateutil/botocore version conflict (windows)
+        conda install -c conda-forge mamba
+        ./ci/02-create-vaex-dev-env.sh ${{ matrix.python-version }} mamba
+    - name: Create env (with conda)
       if: matrix.os == 'windows-latest'
       shell: bash
       run: |
-        source activate vaex
-        pip install python-dateutil==2.8.0  # botocore caps dateutil leading to issues
+        ./ci/02-create-vaex-dev-env.sh ${{ matrix.python-version }}
+        source activate vaex-dev
+        pip install "ipython>=7" "dask>=1"
+        # not sure why, but the conda env is strange (old dask) if we put this constraint in the conda solver
+    - name: free disk space
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo swapoff -a
+        sudo rm -f /swapfile
+        sudo apt clean
+        docker rmi $(docker image ls -aq)
+        df -h
+    - name: Install OpenMP runtime (Mac-only)
+      if: matrix.os == 'macOS-latest'
+      run: |
+        brew install libomp
     - name: Cache compiled binaries
       id: cache-compiled-binaries
-      uses: actions/cache@v1
+      uses: actions/cache@v2
       with:
         path: packages/vaex-core/build
-        key: ${{ runner.OS }}-${{ matrix.python-version }}-${{ hashFiles('packages/vaex-core/src/*') }}
+        key: ${{ runner.OS }}-${{ matrix.python-version }}-${{ hashFiles('packages/vaex-core/src/*') }}-v2
     - name: Fix cache timestamp
       if: steps.cache-compiled-binaries.outputs.cache-hit == 'true' && matrix.os != 'windows-latest'
       shell: bash
       run: |
         find packages/vaex-core/build -type f -exec touch {} +
-    - name: Install vaex (Windows)
-      if: matrix.os == 'windows-latest'
+    - name: Install vaex
       shell: bash
       run: |
-        source activate vaex
-        pip install -vv -e .
-    - name: Install vaex (non-Windows)
-      if: matrix.os != 'windows-latest'
+        ./ci/03-install-vaex.sh
+    - name: Install vaex-enterprise
+      if: ${{ (github.event.pull_request.head.repo.full_name == 'vaexio/vaex') && (matrix.os == 'linux-latest') }}
+      shell: bash
       run: |
-        pip install -vv -e .
-        # pip install -r requirements-ml.txt
+        conda config --set always_yes yes --set changeps1 no
+        source activate vaex-dev
+        cd vaex-enterprise
+        mamba install -c conda-forge distributed
+        pip install ray
+        pip install -e .
     - name: Lint with flake8
       run: |
         echo "soon"
@@ -92,18 +97,21 @@ jobs:
         # flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
         # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
         # flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-    - name: Test with pytest (windows)
+    - name: Test with pytest
       shell: bash
-      if: matrix.os == 'windows-latest'
       run: |
-        source activate vaex
-        python -m pytest tests
-    - name: Test with pytest (non-windows)
+        ./ci/04-run-test-suite.sh
+        source activate vaex-dev
+        python -m vaex.ml.spec packages/vaex-ml/vaex/ml/spec_new.json
+        diff packages/vaex-ml/vaex/ml/spec_new.json packages/vaex-ml/vaex/ml/spec.json
+    - name: Test with pytest (vaex-enterprise)
+      if: ${{ (github.event.pull_request.head.repo.full_name == 'vaexio/vaex') && (matrix.os == 'linux-latest') }}
+      shell: bash
+      run: |
+        source activate vaex-dev
+        py.test vaex-enterprise/tests --timeout=1000
+    - name: Test notebooks
       if: matrix.os != 'windows-latest'
+      shell: bash
       run: |
-        python -m pytest tests packages/vaex-core/vaex/test/dataset.py::TestDataset
-    # - name: Make env smaller for caching
-    #   shell: bash
-    #   run: |
-    #     source activate vaex
-    #     conda uninstall -y matplotlib qt arrow-cpp pyarrow astropy
+        ./ci/05-run-notebooks.sh

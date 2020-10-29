@@ -8,8 +8,9 @@ Opening/reading in your data.
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. autosummary::
-    
+
     vaex.open
+    vaex.concat
     vaex.from_arrow_table
     vaex.from_arrays
     vaex.from_dict
@@ -22,7 +23,7 @@ Visualization.
 ~~~~~~~~~~~~~~
 
 .. autosummary::
-    
+
     vaex.dataframe.DataFrame.plot
     vaex.dataframe.DataFrame.plot1d
     vaex.dataframe.DataFrame.scatter
@@ -34,7 +35,7 @@ Statistics.
 ~~~~~~~~~~~
 
 .. autosummary::
-    
+
     vaex.dataframe.DataFrame.count
     vaex.dataframe.DataFrame.mean
     vaex.dataframe.DataFrame.std
@@ -55,7 +56,7 @@ vaex-core
 ---------
 
 .. automodule:: vaex
-    :members: open, from_arrays, from_dict, from_items, from_arrow_table, from_csv, from_ascii, from_pandas, from_astropy_table, from_samp, open_many, register_function, server, example, app, delayed
+    :members: open, concat, from_arrays, from_dict, from_items, from_arrow_table, from_csv, from_ascii, from_pandas, from_astropy_table, from_samp, open_many, register_function, server, example, app, delayed
     :undoc-members:
     :show-inheritance:
 
@@ -141,6 +142,48 @@ GraphQL operations
 .. autoclass:: vaex.graphql.DataFrameAccessorGraphQL
      :members:
      :special-members:
+
+
+Jupyter widgets accessor
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autoclass:: vaex.jupyter.DataFrameAccessorWidget
+     :members:
+     :special-members:
+
+
+vaex-jupyter
+------------
+
+.. automodule:: vaex.jupyter
+    :members: debounced, flush, interactive_selection
+    :undoc-members:
+    :show-inheritance:
+
+vaex.jupyter.model
+~~~~~~~~~~~~~~~~~~
+
+.. automodule:: vaex.jupyter.model
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+vaex.jupyter.view
+~~~~~~~~~~~~~~~~~~
+
+.. automodule:: vaex.jupyter.view
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+vaex.jupyter.widgets
+~~~~~~~~~~~~~~~~~~
+
+.. automodule:: vaex.jupyter.widgets
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 
 
 
@@ -283,7 +326,7 @@ Clustering
 ~~~~~~~~~~
 
 .. autosummary::
-    
+
     vaex.ml.cluster.KMeans
 
 .. autoclass:: vaex.ml.cluster.KMeans
@@ -305,6 +348,8 @@ Transformers/encoders
     vaex.ml.transformations.CycleTransformer
     vaex.ml.transformations.BayesianTargetEncoder
     vaex.ml.transformations.WeightOfEvidenceEncoder
+    vaex.ml.transformations.KBinsDiscretizer
+    vaex.ml.transformations.GroupByTransformer
 
 
 .. autoclass:: vaex.ml.transformations.FrequencyEncoder
@@ -340,6 +385,12 @@ Transformers/encoders
 .. autoclass:: vaex.ml.transformations.WeightOfEvidenceEncoder
      :members:
 
+.. autoclass:: vaex.ml.transformations.KBinsDiscretizer
+     :members:
+
+.. autoclass:: vaex.ml.transformations.GroupByTransformer
+     :members:
+
 
 Boosted trees
 ~~~~~~~~~~~~~
@@ -348,12 +399,16 @@ Boosted trees
 
     vaex.ml.lightgbm.LightGBMModel
     vaex.ml.xgboost.XGBoostModel
+    vaex.ml.catboost.CatBoostModel
 
 
 .. autoclass:: vaex.ml.lightgbm.LightGBMModel
      :members:
 
 .. autoclass:: vaex.ml.xgboost.XGBoostModel
+     :members:
+
+.. autoclass:: vaex.ml.catboost.CatBoostModel
      :members:
 
 Incubator/experimental

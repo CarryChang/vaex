@@ -1,12 +1,26 @@
 from common import *
 
 
-def test_dropna_objects(ds_local):
-    ds = ds_local
+def test_dropna_objects(df_local_non_arrow):
+    ds = df_local_non_arrow
     ds_dropped = ds.dropna(column_names=['obj'])
     assert ds_dropped['obj'].values.mask.any() == False
     float_elements = np.array([element for element in ds_dropped['obj'].values.data if isinstance(element, float)])
     assert np.isnan(float_elements).any() == False, 'np.nan still exists in column'
+
+
+def test_dropna_cache_bug():
+    # tests https://github.com/vaexio/vaex/pull/874
+    # where repeated dropna would use a cached length
+    df = vaex.from_arrays(
+        x=[1, None, 2],
+        y=[3, 4, None],
+    )
+    df1 = df.dropna('x')
+    assert len(df1) == 2
+
+    df2 = df1.dropna('y')
+    assert len(df2) == 1
 
 
 def test_dropna(ds_local):
@@ -62,7 +76,9 @@ def test_dropmissing():
     assert len(m) == 2
     assert (df.s.dropmissing().tolist() == ["aap", "noot", "mies"])
     assert (df.o.dropmissing().tolist()[:2] == ["aap", "noot"])
-    assert np.isnan(df.o.dropmissing().tolist()[2])
+    # this changed in vaex 4, since the np.nan is considered missing, the whole
+    # columns is seen as string
+    # assert np.isnan(df.o.dropmissing().tolist()[2])
 
 
 # equivalent of isna_test
@@ -78,7 +94,9 @@ def test_dropnan():
     m = df.m.dropnan().tolist()
     assert m == [0, None, None]
     assert (df.s.dropnan().tolist() == ["aap", None, "noot", "mies"])
-    assert (df.o.dropnan().tolist() == ["aap", None, "noot"])
+    # this changed in vaex 4, since the np.nan is considered missing, the whole
+    # columns is seen as string
+    assert (df.o.dropnan().tolist() == ["aap", None, "noot", None])
 
 def test_dropna():
     s = vaex.string_column(["aap", None, "noot", "mies"])
@@ -93,3 +111,13 @@ def test_dropna():
     assert m == [0]
     assert (df.s.dropna().tolist() == ["aap", "noot", "mies"])
     assert (df.o.dropna().tolist() == ["aap", "noot"])
+
+
+def test_dropna_all_columns():
+    x = [1, 2, 3, 4, 5]
+    y = ['dog', 'dog', None, 'cat', None]
+    df = vaex.from_arrays(x=x, y=y)
+
+    df_dropped = df.dropna()
+    assert df_dropped.x.tolist() == [1, 2, 4]
+    assert df_dropped.y.tolist() == ['dog', 'dog', 'cat']

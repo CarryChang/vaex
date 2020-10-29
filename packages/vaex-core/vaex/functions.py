@@ -1,15 +1,35 @@
 import vaex.serialize
 import json
 import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 from vaex import column
 from vaex.column import _to_string_sequence, _to_string_column, _to_string_list_sequence, _is_stringy
+from vaex.dataframe import docsubst
+import vaex.arrow.numpy_dispatch
 import re
 import vaex.expression
 import functools
 import six
 
+
 # @vaex.serialize.register_function
 # class Function(FunctionSerializable):
+
+
+def _arrow_string_might_grow(ar, factor):
+    # will upcast utf8 string to large_utf8 string when needed
+    # TODO: in the future we might be able to rely on Apache Arrow for this
+    # TODO: placeholder, needs a test
+    return ar
+
+
+def _arrow_string_kernel_dispatch(name, ascii, *args):
+    # helper function to call a pyarrow kernel
+    variant = 'ascii' if ascii else 'utf8'
+    kernel_name = f'{variant}_{name}'  # eg utf8_istitle / ascii_istitle
+    return pc.call_function(kernel_name, args)
+
 
 scopes = {
     'str': vaex.expression.StringOperations,
@@ -18,11 +38,13 @@ scopes = {
     'td': vaex.expression.TimeDelta
 }
 
-def register_function(scope=None, as_property=False, name=None, on_expression=True):
+def register_function(scope=None, as_property=False, name=None, on_expression=True, df_accessor=None):
     """Decorator to register a new function with vaex.
 
     If on_expression is True, the function will be available as a method on an
     Expression, where the first argument will be the expression itself.
+
+    If `df_accessor` is given, it is added as a method to that dataframe accessor (see e.g. vaex/geo.py)
 
     Example:
 
@@ -52,64 +74,79 @@ def register_function(scope=None, as_property=False, name=None, on_expression=Tr
         if name.startswith(prefix):
             name = name[len(prefix):]
         full_name = prefix + name
-        if on_expression:
-            if scope:
-                def closure(name=name, full_name=full_name, function=f):
-                    def wrapper(self, *args, **kwargs):
-                        lazy_func = getattr(self.expression.ds.func, full_name)
-                        args = (self.expression, ) + args
-                        return lazy_func(*args, **kwargs)
-                    return functools.wraps(function)(wrapper)
-                if as_property:
-                    setattr(scopes[scope], name, property(closure()))
-                else:
-                    setattr(scopes[scope], name, closure())
+        if df_accessor:
+            def closure(name=name, full_name=full_name, function=f):
+                def wrapper(self, *args, **kwargs):
+                    lazy_func = getattr(self.df.func, full_name)
+                    lazy_func = vaex.arrow.numpy_dispatch.autowrapper(lazy_func)
+                    return lazy_func(*args, **kwargs)
+                return functools.wraps(function)(wrapper)
+            if as_property:
+                setattr(df_accessor, name, property(closure()))
             else:
-                def closure(name=name, full_name=full_name, function=f):
-                    def wrapper(self, *args, **kwargs):
-                        lazy_func = getattr(self.ds.func, full_name)
-                        args = (self, ) + args
-                        return lazy_func(*args, **kwargs)
-                    return functools.wraps(function)(wrapper)
-                setattr(vaex.expression.Expression, name, closure())
-        vaex.expression.expression_namespace[prefix + name] = f
+                setattr(df_accessor, name, closure())
+        else:
+            if on_expression:
+                if scope:
+                    def closure(name=name, full_name=full_name, function=f):
+                        def wrapper(self, *args, **kwargs):
+                            lazy_func = getattr(self.expression.ds.func, full_name)
+                            lazy_func = vaex.arrow.numpy_dispatch.autowrapper(lazy_func)
+                            args = (self.expression, ) + args
+                            return lazy_func(*args, **kwargs)
+                        return functools.wraps(function)(wrapper)
+                    if as_property:
+                        setattr(scopes[scope], name, property(closure()))
+                    else:
+                        setattr(scopes[scope], name, closure())
+                else:
+                    def closure(name=name, full_name=full_name, function=f):
+                        def wrapper(self, *args, **kwargs):
+                            lazy_func = getattr(self.ds.func, full_name)
+                            lazy_func = vaex.arrow.numpy_dispatch.autowrapper(lazy_func)
+                            args = (self, ) + args
+                            return lazy_func(*args, **kwargs)
+                        return functools.wraps(function)(wrapper)
+                    setattr(vaex.expression.Expression, name, closure())
+        vaex.expression.expression_namespace[prefix + name] = vaex.arrow.numpy_dispatch.autowrapper(f)
         return f  # we leave the original function as is
     return wrapper
 
 # name maps to numpy function
 # <vaex name>:<numpy name>
 numpy_function_mapping = [name.strip().split(":") if ":" in name else (name, name) for name in """
-sinc
-sin
-cos
-tan
-arcsin
+abs
 arccos
+arccosh
+arcsin
+arcsinh
 arctan
 arctan2
-sinh
-cosh
-tanh
-arcsinh
-arccosh
 arctanh
+clip
+cos
+cosh
+deg2rad
+digitize
+exp
+expm1
+isfinite
+isinf
 log
 log10
 log1p
-exp
-expm1
-sqrt
-abs
-where
-rad2deg
-deg2rad
-minimum
 maximum
-clip
+minimum
+rad2deg
+round
 searchsorted
-isfinite
-digitize
-searchsorted
+sin
+sinc
+sinh
+sqrt
+tan
+tanh
+where
 """.strip().split()]
 for name, numpy_name in numpy_function_mapping:
     if not hasattr(np, numpy_name):
@@ -131,8 +168,11 @@ def fillmissing(ar, value):
     '''Returns an array where missing values are replaced by value.
     See :`ismissing` for the definition of missing values.
     '''
-    # TODO: optimize, we don't want to_numpy for strings, we want to
-    # do this in c++
+    # TODO: optimize once https://github.com/apache/arrow/pull/7656 gets in
+    was_string = _is_stringy(ar)
+    if was_string:
+        ar = np.array(ar)
+
     ar = ar if not isinstance(ar, column.Column) else ar.to_numpy()
     mask = ismissing(ar)
     if np.any(mask):
@@ -141,6 +181,8 @@ def fillmissing(ar, value):
         else:
             ar = ar.copy()
         ar[mask] = value
+    if was_string:
+        vaex.array_types.to_arrow(ar)
     return ar
 
 
@@ -153,6 +195,7 @@ def fillnan(ar, value):
     # they will never contain nan
     if not _is_stringy(ar):
         ar = ar if not isinstance(ar, column.Column) else ar.to_numpy()
+        ar = vaex.array_types.to_numpy(ar, strict=True)
         if ar.dtype.kind in 'fO':
             mask = isnan(ar)
             if np.any(mask):
@@ -167,6 +210,10 @@ def fillna(ar, value):
     See :`isna` for the definition of missing values.
 
     '''
+    # TODO: should use arrow fill_null in the future
+    if isinstance(ar, vaex.array_types.supported_arrow_array_types):
+        ar = fillna(vaex.array_types.to_numpy(ar, strict=True), value)
+        return vaex.array_types.to_arrow(ar)
     ar = ar if not isinstance(ar, column.Column) else ar.to_numpy()
     mask = isna(ar)
     if np.any(mask):
@@ -189,7 +236,9 @@ def ismissing(x):
         else:
             return x.mask == 1
     else:
-        if not isinstance(x, np.ndarray) or x.dtype.kind in 'US':
+        if isinstance(x, vaex.array_types.supported_arrow_array_types):
+            return pa.compute.is_null(x)
+        elif not isinstance(x, np.ndarray) or x.dtype.kind in 'US':
             x = _to_string_sequence(x)
             mask = x.mask()
             if mask is None:
@@ -209,6 +258,8 @@ def notmissing(x):
 @register_function()
 def isnan(x):
     """Returns an array where there are NaN values"""
+    if isinstance(x, vaex.array_types.supported_arrow_array_types):
+        x = vaex.array_types.to_numpy(x)
     if isinstance(x, np.ndarray):
         if np.ma.isMaskedArray(x):
             # we don't want a masked arrays
@@ -249,6 +300,34 @@ def _pandas_dt_fix(x):
         x = x.copy()
     return x
 
+@register_function(scope='dt', as_property=True)
+def dt_date(x):
+    """Return the date part of the datetime value
+
+    :returns: an expression containing the date portion of a datetime value
+
+    Example:
+
+    >>> import vaex
+    >>> import numpy as np
+    >>> date = np.array(['2009-10-12T03:31:00', '2016-02-11T10:17:34', '2015-11-12T11:34:22'], dtype=np.datetime64)
+    >>> df = vaex.from_arrays(date=date)
+    >>> df
+      #  date
+      0  2009-10-12 03:31:00
+      1  2016-02-11 10:17:34
+      2  2015-11-12 11:34:22
+
+    >>> df.date.dt.date
+    Expression = dt_date(date)
+    Length: 3 dtype: datetime64[D] (expression)
+    -------------------------------------------
+    0  2009-10-12
+    1  2016-02-11
+    2  2015-11-12
+    """
+    import pandas as pd
+    return pd.Series(_pandas_dt_fix(x)).dt.date.values.astype(np.datetime64)
 
 @register_function(scope='dt', as_property=True)
 def dt_dayofweek(x):
@@ -422,7 +501,36 @@ def dt_month_name(x):
     2  November
     """
     import pandas as pd
-    return pd.Series(_pandas_dt_fix(x)).dt.month_name().values.astype(str)
+    return pa.array(pd.Series(_pandas_dt_fix(x)).dt.month_name())
+
+@register_function(scope='dt', as_property=True)
+def dt_quarter(x):
+    """Extracts the quarter from a datetime sample.
+
+    :returns: an expression containing the number of the quarter extracted from a datetime column.
+
+    Example:
+
+    >>> import vaex
+    >>> import numpy as np
+    >>> date = np.array(['2009-10-12T03:31:00', '2016-02-11T10:17:34', '2015-11-12T11:34:22'], dtype=np.datetime64)
+    >>> df = vaex.from_arrays(date=date)
+    >>> df
+      #  date
+      0  2009-10-12 03:31:00
+      1  2016-02-11 10:17:34
+      2  2015-11-12 11:34:22
+
+    >>> df.date.dt.quarter
+    Expression = dt_quarter(date)
+    Length: 3 dtype: int64 (expression)
+    -----------------------------------
+    0  4
+    1  1
+    2  4
+    """
+    import pandas as pd
+    return pd.Series(_pandas_dt_fix(x)).dt.quarter.values
 
 @register_function(scope='dt', as_property=True)
 def dt_day(x):
@@ -480,7 +588,7 @@ def dt_day_name(x):
     2  Thursday
     """
     import pandas as pd
-    return pd.Series(_pandas_dt_fix(x)).dt.day_name().values.astype(str)
+    return pa.array(pd.Series(_pandas_dt_fix(x)).dt.day_name())
 
 @register_function(scope='dt', as_property=True)
 def dt_weekofyear(x):
@@ -597,6 +705,65 @@ def dt_second(x):
     """
     import pandas as pd
     return pd.Series(_pandas_dt_fix(x)).dt.second.values
+
+@register_function(scope='dt')
+def dt_strftime(x, date_format):
+    """Returns a formatted string from a datetime sample.
+
+    :returns: an expression containing a formatted string extracted from a datetime column.
+
+    Example:
+
+    >>> import vaex
+    >>> import numpy as np
+    >>> date = np.array(['2009-10-12T03:31:00', '2016-02-11T10:17:34', '2015-11-12T11:34:22'], dtype=np.datetime64)
+    >>> df = vaex.from_arrays(date=date)
+    >>> df
+      #  date
+      0  2009-10-12 03:31:00
+      1  2016-02-11 10:17:34
+      2  2015-11-12 11:34:22
+
+    >>> df.date.dt.strftime("%Y-%m")
+    Expression = dt_strftime(date, '%Y-%m')
+    Length: 3 dtype: object (expression)
+    ------------------------------------
+    0  2009-10
+    1  2016-02
+    2  2015-11
+    """
+    import pandas as pd
+    return pa.array(pd.Series(_pandas_dt_fix(x)).dt.strftime(date_format))
+
+@register_function(scope='dt')
+def dt_floor(x, freq, *args):
+    """Perform floor operation on an expression for a given frequency.
+
+    :param freq: The frequency level to floor the index to. Must be a fixed frequency like 'S' (second), or 'H' (hour), but not 'ME' (month end).
+    :returns: an expression containing the floored datetime column.
+
+    Example:
+
+    >>> import vaex
+    >>> import numpy as np
+    >>> date = np.array(['2009-10-12T03:31:00', '2016-02-11T10:17:34', '2015-11-12T11:34:22'], dtype=np.datetime64)
+    >>> df = vaex.from_arrays(date=date)
+    >>> df
+      #  date
+      0  2009-10-12 03:31:00
+      1  2016-02-11 10:17:34
+      2  2015-11-12 11:34:22
+
+    >>> df.date.dt.floor("H")
+    Expression = dt_floor(date, 'H')
+    Length: 3 dtype: datetime64[ns] (expression)
+    --------------------------------------------
+    0  2009-10-12 03:00:00.000000000
+    1  2016-02-11 10:00:00.000000000
+    2  2015-11-12 11:00:00.000000000
+    """
+    import pandas as pd
+    return pd.Series(_pandas_dt_fix(x)).dt.floor(freq, *args).values
 
 ########## timedelta operations ##########
 
@@ -836,7 +1003,7 @@ def str_capitalize(x):
     4         Way.
     """
     sl = _to_string_sequence(x).capitalize()
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    return column.ColumnStringArrow.from_string_sequence(sl)
 
 @register_function(scope='str')
 def str_cat(x, other):
@@ -911,7 +1078,8 @@ def str_center(x, width, fillchar=' '):
     4  !!!!way.!!!
     """
     sl = _to_string_sequence(x).pad(width, fillchar, True, True)
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    return column.ColumnStringArrow.from_string_sequence(sl)
+
 
 @register_function(scope='str')
 def str_contains(x, pattern, regex=True):
@@ -944,7 +1112,10 @@ def str_contains(x, pattern, regex=True):
     3  False
     4  False
     """
-    return _to_string_sequence(x).search(pattern, regex)
+    if regex:
+        return _to_string_sequence(x).search(pattern, regex)
+    else:
+        return pc.match_substring(x, pattern)
 
 # TODO: default regex is False, which breaks with pandas
 @register_function(scope='str')
@@ -1107,7 +1278,8 @@ def str_get(x, i):
         sl = x.slice_string_end(-1)
     else:
         sl = x.slice_string(i, i+1)
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    return column.ColumnStringArrow.from_string_sequence(sl)
+
 
 @register_function(scope='str')
 def str_index(x, sub, start=0, end=None):
@@ -1148,7 +1320,8 @@ def str_index(x, sub, start=0, end=None):
 def str_join(x, sep):
     """Same as find (difference with pandas is that it does not raise a ValueError)"""
     sl = _to_string_list_sequence(x).join(sep)
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    return column.ColumnStringArrow.from_string_sequence(sl)
+
 
 @register_function(scope='str')
 def str_len(x):
@@ -1244,7 +1417,8 @@ def str_ljust(x, width, fillchar=' '):
     4   way.!!!!!!
     """
     sl = _to_string_sequence(x).pad(width, fillchar, False, True)
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    return column.ColumnStringArrow.from_string_sequence(sl)
+
 
 @register_function(scope='str')
 def str_lower(x):
@@ -1275,8 +1449,8 @@ def str_lower(x):
     3          our
     4         way.
     """
-    sl = _to_string_sequence(x).lower()
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    return pc.utf8_lower(x)
+
 
 @register_function(scope='str')
 def str_lstrip(x, to_strip=None):
@@ -1310,7 +1484,8 @@ def str_lstrip(x, to_strip=None):
     """
     # in c++ we give empty string the same meaning as None
     sl = _to_string_sequence(x).lstrip('' if to_strip is None else to_strip) if to_strip != '' else x
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    return column.ColumnStringArrow.from_string_sequence(sl)
+
 
 @register_function(scope='str')
 def str_match(x, pattern):
@@ -1379,7 +1554,8 @@ def str_pad(x, width, side='left', fillchar=' '):
     4   !!!!!!way.
     """
     sl = _to_string_sequence(x).pad(width, fillchar, side in ['left', 'both'], side in ['right', 'both'])
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    return column.ColumnStringArrow.from_string_sequence(sl)
+
 
 @register_function(scope='str')
 def str_repeat(x, repeats):
@@ -1412,7 +1588,8 @@ def str_repeat(x, repeats):
     4                       way.way.way.
     """
     sl = _to_string_sequence(x).repeat(repeats)
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    return column.ColumnStringArrow.from_string_sequence(sl)
+
 
 @register_function(scope='str')
 def str_replace(x, pat, repl, n=-1, flags=0, regex=False):
@@ -1449,7 +1626,8 @@ def str_replace(x, pat, repl, n=-1, flags=0, regex=False):
     4         way.
     """
     sl = _to_string_sequence(x).replace(pat, repl, n, flags, regex)
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    return column.ColumnStringArrow.from_string_sequence(sl)
+
 
 @register_function(scope='str')
 def str_rfind(x, sub, start=0, end=None):
@@ -1553,7 +1731,8 @@ def str_rjust(x, width, fillchar=' '):
     4   !!!!!!way.
     """
     sl = _to_string_sequence(x).pad(width, fillchar, True, False)
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    return column.ColumnStringArrow.from_string_sequence(sl)
+
 
 # TODO: rpartition
 
@@ -1589,7 +1768,8 @@ def str_rstrip(x, to_strip=None):
     """
     # in c++ we give empty string the same meaning as None
     sl = _to_string_sequence(x).rstrip('' if to_strip is None else to_strip) if to_strip != '' else x
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    return column.ColumnStringArrow.from_string_sequence(sl)
+
 
 @register_function(scope='str')
 def str_slice(x, start=0, stop=None):  # TODO: support n
@@ -1709,7 +1889,7 @@ def str_strip(x, to_strip=None):
     """
     # in c++ we give empty string the same meaning as None
     sl = _to_string_sequence(x).strip('' if to_strip is None else to_strip) if to_strip != '' else x
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    return column.ColumnStringArrow.from_string_sequence(sl)
 
 # TODO: swapcase, translate
 
@@ -1743,13 +1923,15 @@ def str_title(x):
     4         Way.
     """
     sl = _to_string_sequence(x).title()
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    return column.ColumnStringArrow.from_string_sequence(sl)
 
 
 @register_function(scope='str')
-def str_upper(x):
+@docsubst
+def str_upper(x, ascii=False):
     """Converts all strings in a column to uppercase.
 
+    :param bool ascii: {ascii}
     :returns: an expression containing the converted strings.
 
     Example:
@@ -1777,8 +1959,10 @@ def str_upper(x):
     4         WAY.
 
     """
-    sl = _to_string_sequence(x).upper()
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    if ascii:
+        return pc.ascii_upper(x)
+    else:
+        return pc.utf8_upper(_arrow_string_might_grow(x, 3/2))
 
 
 # TODO: wrap, is*, get_dummies(maybe?)
@@ -1814,13 +1998,15 @@ def str_zfill(x, width):
     4  00000000way.
     """
     sl = _to_string_sequence(x).pad(width, '0', True, False)
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    return column.ColumnStringArrow.from_string_sequence(sl)
 
 
 @register_function(scope='str')
-def str_isalnum(x):
+@docsubst
+def str_isalnum(x, ascii=False):
     """Check if all characters in a string sample are alphanumeric.
 
+    :param bool ascii: {ascii}
     :returns: an expression evaluated to True if a sample contains only alphanumeric characters, otherwise False.
 
     Example:
@@ -1846,7 +2032,9 @@ def str_isalnum(x):
     3   True
     4  False
     """
-    return _to_string_sequence(x).isalnum()
+    kernel_function = pc.ascii_is_alnum if ascii else pc.utf8_is_alnum
+    return kernel_function(x)
+
 
 @register_function(scope='str')
 def str_isalpha(x):
@@ -2003,9 +2191,11 @@ def str_isupper(x):
     """
     return _to_string_sequence(x).isupper()
 
-# @register_function(scope='str')
-# def str_istitle(x):
-#     return _to_string_sequence(x).istitle()
+@register_function(scope='str')
+def str_istitle(x, ascii=False):
+    '''TODO'''
+    return _arrow_string_kernel_dispatch('is_title', ascii, x)
+
 
 # @register_function(scope='str')
 # def str_isnumeric(x):
@@ -2019,7 +2209,8 @@ def str_isupper(x):
 def to_string(x):
     # don't change the dtype, otherwise for each block the dtype may be different (string length)
     sl = vaex.strings.to_string(x)
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    return column.ColumnStringArrow.from_string_sequence(sl)
+
 
 @register_function()
 def format(x, format):
@@ -2029,7 +2220,7 @@ def format(x, format):
         # sometimes the dtype can be object, but seen as an string array
         x = _to_string_sequence(x)
     sl = vaex.strings.format(x, format)
-    return column.ColumnStringArrow(sl.bytes, sl.indices, sl.length, sl.offset, string_sequence=sl)
+    return column.ColumnStringArrow.from_string_sequence(sl)
 
 
 for name in dir(scopes['str']):
@@ -2051,7 +2242,9 @@ for name in dir(scopes['str']):
             value = method(*args, **kwargs)
             if name in force_string:
                 value = _to_string_column(value.values, force=True)
-            return value
+                return value
+            else:
+                return value.values
         return wrapper
     wrapper = pandas_wrapper()
     wrapper.__doc__ = "Wrapper around pandas.Series.%s" % name
@@ -2101,14 +2294,23 @@ def _float(x):
 @register_function(name='astype', on_expression=False)
 def _astype(x, dtype):
     if dtype == 'str':
-        mask = np.isnan(x)
-        x = x.astype(dtype).astype('O')
-        x[mask] = None
+        if isinstance(x, np.ndarray) and x.dtype.kind not in 'US':
+            try:
+                x = x.astype(dtype).astype('O')
+                mask = np.isnan(x)
+                x[mask] = None
+            except TypeError:
+                pass  # does not work for all data
         return _to_string_column(x)
     # we rely on numpy for astype conversions (TODO: possible performance hit?)
     if isinstance(x, vaex.column.ColumnString):
         x = x.to_numpy()
-    return x.astype(dtype)
+    if isinstance(x, vaex.array_types.supported_arrow_array_types):
+        x = x.to_pandas().values
+    y = x.astype(dtype if dtype not in ['string', 'large_string'] else 'str')
+    if vaex.column._is_stringy(y):
+        y = vaex.column._to_string_column(y)
+    return y
 
 
 @register_function(name='isin', on_expression=False)
@@ -2117,7 +2319,46 @@ def _isin(x, values):
         x = vaex.column._to_string_column(x)
         return x.string_sequence.isin(values)
     else:
-        return np.isin(x, values)
+        # TODO: this happens when a column is of dtype=object
+        # but only strings, the values gets converted to a superstring array
+        # but numpy doesn't know what to do with that
+        if hasattr(values, 'to_numpy'):
+            values = values.to_numpy()
+        if np.ma.isMaskedArray(x):
+            return np.ma.isin(x, values)
+        else:
+            return np.isin(x, values)
+
+
+@register_function(name='isin_set', on_expression=False)
+def _isin_set(x, set):
+    if vaex.column._is_stringy(x) or isinstance(set, vaex.superutils.ordered_set_string):
+        x = vaex.column._to_string_column(x)
+        x = _to_string_sequence(x)
+        # return x.string_sequence.isin(values)
+        return set.isin(x)
+    else:
+        if np.ma.isMaskedArray(x):
+            isin = set.isin(x.data)
+            isin[x.mask] = False
+            return isin
+        else:
+            return set.isin(x)
+
+
+@register_function()
+def as_arrow(x):
+    '''Lazily convert to Apache Arrow array type'''
+    from .array_types import to_arrow
+    # since we do this lazily, we can convert to native without wasting memory
+    return to_arrow(x, convert_to_native=True)
+
+
+@register_function()
+def as_numpy(x, strict=False):
+    '''Lazily convert to NumPy ndarray type'''
+    from .array_types import to_numpy
+    return to_numpy(x, strict=strict)
 
 
 def add_geo_json(ds, json_or_file, column_name, longitude_expression, latitude_expresion, label=None, persist=True, overwrite=False, inplace=False, mapping=None):

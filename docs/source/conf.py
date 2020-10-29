@@ -38,8 +38,18 @@ extensions = [
     'sphinx.ext.autosummary',
     'IPython.sphinxext.ipython_console_highlighting',
     'nbsphinx',
-    'sphinx.ext.intersphinx'
+    'sphinx.ext.intersphinx',
+    'sphinx_gallery.load_style',
+	'sphinx_sitemap',
 ]
+# for sphinx_sitemap
+html_baseurl = 'https://vaex.io/docs/'
+# todo: might want to change this for multiple versions
+sitemap_url_scheme = "{link}"
+sitemap_filename = "sitemap-docs.xml"
+
+
+
 import os
 on_rtd = os.environ.get('READTHEDOCS', None) == 'True'
 # if not on_rtd:
@@ -146,7 +156,15 @@ except:
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for each theme, see the
 # documentation.
-html_theme_options = {}#dict(analytics_id='UA-60052576-1')
+html_theme_options = dict(
+	# analytics_id='UA-60052576-1'  this is configured in rtfd.io
+	canonical_url="https://vaex.io/docs/"
+)
+
+# not sure if this helps, otherwise it does not work on rtd
+html_context = dict(
+	canonical_url="https://vaex.io/docs/"
+)
 
 # Add any paths that contain custom themes here, relative to this directory.
 #html_theme_path = []
@@ -343,3 +361,9 @@ intersphinx_mapping = {
     'numpy': ('http://docs.scipy.org/doc/numpy/', None),
     'dask': ('http://docs.dask.org/en/latest/', None),
 }
+
+nbsphinx_thumbnails = {
+    'example_jupyter_ipyvolume': 'screenshot/example_jupyter_ipyvolume.png',
+    'example_jupyter_plotly': 'screenshot/example_jupyter_plotly.png',
+}
+exclude_patterns = ['**.ipynb_checkpoints']

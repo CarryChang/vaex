@@ -1,3 +1,7 @@
+import xarray
+import pyarrow as pa
+
+
 def test_to_items(df_local):
     df = df_local
     items = df.to_items(['x', 'y'])
@@ -13,6 +17,21 @@ def test_to_items(df_local):
         assert ycname == 'y'
         assert xcvalues.tolist() == xvalues[i1:i2].tolist()
         assert ycvalues.tolist() == yvalues[i1:i2].tolist()
+
+
+def test_to_array_type_list(df_local):
+    df = df_local
+    data = df[:3]['x', 'y'].to_dict(array_type='list')
+    assert data == {'x': [0, 1, 2], 'y': [0, 1, 4]}
+    assert isinstance(data['x'], list)
+
+
+def test_to_array_type_xarray(df_local):
+    df = df_local
+    data = df[:3]['x', 'y'].to_dict(array_type='xarray')
+    assert isinstance(data['x'], xarray.DataArray)
+    assert data['x'].data.tolist() == [0, 1, 2]
+    assert data['y'].data.tolist() == [0, 1, 4]
 
 
 def test_to_arrow_table(df_local):
@@ -40,3 +59,9 @@ def test_to_pandas_df(df_local):
         assert pdf.columns == ['y']
         assert pdf.index.values.tolist() == x[i1:i2].tolist()
         assert pdf.y.values.tolist() == y[i1:i2].tolist()
+
+
+def test_to_arrow_arrays(df_local):
+    df = df_local
+    assert isinstance(df['x'].to_arrow(convert_to_native=True), pa.Array)
+    # assert isinstance(pa.array(df['x']), pa.Array)

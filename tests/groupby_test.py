@@ -64,6 +64,16 @@ def test_groupby_options():
     assert dfg.y_sum.tolist() == sum_answer
 
 
+def test_groupby_long_name(df_local):
+    df = df_local.extract()
+    g = np.array([0, 0, 0, 0, 1, 1, 1, 1, 2, 2])
+    df.add_column('g', g)
+    df['long_name'] = df.x
+    dfg = df.groupby(by=df.g, agg=[vaex.agg.mean(df.long_name)]).sort('g')
+    # bugfix check for mixing up the name
+    assert 'long_name_mean' in dfg
+
+
 def test_groupby_1d(ds_local):
     ds = ds_local.extract()
     g = np.array([0, 0, 0, 0, 1, 1, 1, 1, 2, 2])
@@ -71,6 +81,17 @@ def test_groupby_1d(ds_local):
     dfg = ds.groupby(by=ds.g, agg={'count': vaex.agg.count()}).sort('g')
     assert dfg.g.tolist() == [0, 1, 2]
     assert dfg['count'].tolist() == [4, 4, 2]
+
+def test_groupby_1d_cat(ds_local):
+    ds = ds_local.extract()
+    g = np.array([0, 0, 0, 0, 1, 1, 1, 1, 2, 2])
+    ds.add_column('g', g)
+    ds.categorize('g', labels=['cat', 'dog', 'snake'], inplace=True)
+    dfg = ds.groupby(by=ds.g, agg='count')
+
+    assert dfg.g.tolist() == ['cat', 'dog', 'snake']
+    assert dfg['count'].tolist() == [4, 4, 2]
+
 
 
 def test_groupby_1d_nan(ds_local):
@@ -92,6 +113,17 @@ def test_binby_1d(ds_local):
     assert ar.coords['statistic'].values.tolist() == ["count"]
     assert ar.dims == ('statistic', 'g')
     assert ar.data.tolist() == [[4, 4, 2]]
+
+
+def test_binby_1d_cat(ds_local):
+    ds = ds_local.extract()
+    g = np.array([0, 0, 0, 0, 1, 1, 1, 1, 2, 2])
+    ds.add_column('g', g)
+    ds.categorize('g', labels=['cat', 'dog', 'snake'], inplace=True)
+    ar = ds.binby(by=ds.g, agg=vaex.agg.count())
+
+    assert ar.coords['g'].values.tolist() == ['cat', 'dog', 'snake']
+    assert ar.data.tolist() == [4, 4, 2]
 
 
 def test_binby_2d(ds_local):

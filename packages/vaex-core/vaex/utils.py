@@ -16,12 +16,12 @@ import numbers
 import keyword
 
 import numpy as np
+import pyarrow as pa
 import progressbar
 import psutil
 import six
 import yaml
 
-from .column import str_type
 from .json import VaexJsonEncoder, VaexJsonDecoder
 
 
@@ -142,28 +142,6 @@ def disjoined(data):
     return data_disjoined
 
 
-def get_data_file(filename):
-    try:  # this works for egg like stuff, but fails for py2app apps
-        from pkg_resources import Requirement, resource_filename
-        path = resource_filename(Requirement.parse("vaex"), filename)
-        if os.path.exists(path):
-            return path
-    except:
-        pass
-    # this is where we expect data to be in normal installations
-    for extra in ["", "data", "data/dist", "../data", "../data/dist"]:
-        path = os.path.join(os.path.dirname(__file__), "..", "..", extra, filename)
-        if os.path.exists(path):
-            return path
-        path = os.path.join(sys.prefix, extra, filename)
-        if os.path.exists(path):
-            return path
-        # if all fails..
-        path = os.path.join(get_root_path(), extra, filename)
-        if os.path.exists(path):
-            return path
-
-
 def get_root_path():
     osname = platform.system().lower()
     # if (osname == "linux") and is_frozen: # we are using pyinstaller
@@ -225,8 +203,7 @@ def get_private_dir(subdir=None, *extra):
     path = os.path.expanduser('~/.vaex')
     if subdir:
         path = os.path.join(path, subdir, *extra)
-    if not os.path.exists(path):
-        os.makedirs(path)
+    os.makedirs(path,exist_ok=True)
     return path
 
 
@@ -558,11 +535,21 @@ def unlistify(waslist, *args):
             return values[0]
 
 
+def valid_expression(names, name):
+    if name in names and not valid_identifier(name):
+        return f'df[%r]' % name
+    else:
+        return name
+
+
+def valid_identifier(name):
+    return name.isidentifier() and not keyword.iskeyword(name)
+
+
 def find_valid_name(name, used=[]):
+    if isinstance(name, int):
+        name = str(name)
     first, rest = name[0], name[1:]
-    name = re.sub("[^a-zA-Z_]", "_", first) + re.sub("[^a-zA-Z_0-9]", "_", rest)
-    if keyword.iskeyword(name):
-        name += '_'
     if name in used:
         nr = 1
         while name + ("_%d" % nr) in used:
@@ -741,7 +728,7 @@ def _issequence(x):
 
 
 def _isnumber(x):
-    return isinstance(x, numbers.Number)
+    return isinstance(x, (numbers.Number, pa.Scalar))
 
 
 def _is_limit(x):
@@ -868,12 +855,15 @@ def gen_to_list(fn=None, wrapper=list):
 
 
 def find_type_from_dtype(namespace, prefix, dtype, transient=True):
-    if dtype == str_type:
+    from .array_types import is_string_type
+    if is_string_type(dtype):
         if transient:
             postfix = 'string'
         else:
             postfix = 'string' # view not support atm
     else:
+        import vaex
+        dtype = vaex.array_types.to_numpy_type(dtype)
         postfix = str(dtype)
         if postfix == '>f8':
             postfix = 'float64'
@@ -892,7 +882,7 @@ def find_type_from_dtype(namespace, prefix, dtype, transient=True):
 
 
 def to_native_dtype(dtype):
-    if dtype.byteorder not in "<=|":
+    if isinstance(dtype, np.dtype) and dtype.byteorder not in "<=|":
         return dtype.newbyteorder()
     else:
         return dtype
@@ -918,14 +908,18 @@ def unmask_selection_mask(selection_mask):
 
 
 def upcast(dtype):
-    if dtype.kind == "b":
-        return np.dtype('int64')
-    if dtype.kind == "i":
-        return np.dtype('int64')
-    if dtype.kind == "u":
-        return np.dtype('uint64')
-    if dtype.kind == "f":
-        return np.dtype('float64')
+    if isinstance(dtype, np.dtype):
+        if dtype.kind == "b":
+            return np.dtype('int64')
+        if dtype.kind == "i":
+            return np.dtype('int64')
+        if dtype.kind == "u":
+            return np.dtype('uint64')
+        if dtype.kind == "f":
+            return np.dtype('float64')
+    else:
+        # TODO: arrow
+        pass
     return dtype
 
 
@@ -955,3 +949,15 @@ def required_dtype_for_max(N, signed=True):
             return dtype
     else:
         raise ValueError(f'Cannot store a max value on {N} inside an uint64/int64')
+
+
+def print_stack_trace(*args, **kwargs):
+    import traceback
+    print("args: ", args, kwargs)
+    traceback.print_stack()
+
+
+def print_exception_trace(e):
+    import traceback
+    import sys
+    print(''.join(traceback.format_exception(None, e, e.__traceback__)), file=sys.stdout, flush=True)

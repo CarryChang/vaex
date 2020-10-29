@@ -16,22 +16,21 @@ version = version.__version__
 url = 'https://www.github.com/maartenbreddels/vaex'
 
 install_requires = [
-      'vaex-core>=2.0.0-dev,<3',
-      'vaex-viz>=0.4.0-dev,<0.5',
-      'vaex-server>=0.3.0-dev,<0.4',
-      'vaex-hdf5>=0.6.0-dev,<0.7',
-      'vaex-astro>=0.7.0-dev,<0.8',
-      'vaex-arrow>=0.5.0-dev,<0.6',
-      'vaex-jupyter>=0.5.0-dev,<0.6',
-      'vaex-ml>=0.9.0-dev,<0.10',
-      # vaex-graphql it not on conda-forge yet
+      'vaex-core>=4.0.0-alpha.3,<5',
+      'vaex-viz>=0.5.0-dev.0,<0.6',
+      'vaex-server>=0.4.0-dev.0,<0.5',
+      'vaex-hdf5>=0.7.0-alpha.1,<0.8',
+      'vaex-astro>=0.8.0-dev.0,<0.9',
+      'vaex-jupyter>=0.6.0-dev.0,<0.7',
+      'vaex-ml>=0.11.0-alpha.3,<0.12',
+      # vaex-graphql is not on conda-forge yet
 ]
 
 setup(name=name,
       version=version,
       description='Out-of-Core DataFrames to visualize and explore big tabular datasets',
-      long_description=open('README.rst').read(),
-      long_description_content_type='text/plain',
+      long_description=open('README.md').read(),
+      long_description_content_type='text/markdown',
       url=url,
       author=author,
       author_email=author_email,

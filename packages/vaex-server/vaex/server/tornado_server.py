@@ -22,8 +22,11 @@ import sys
 
 from vaex.encoding import serialize, deserialize, Encoding
 import vaex.server.service
+import vaex.asyncio
+import vaex.server.dataframe
 import vaex.core._version
 import vaex.server._version
+import vaex.server.dataframe
 
 
 logger = logging.getLogger("vaex.webserver")
@@ -62,6 +65,8 @@ class WebSocketHandler(tornado.websocket.WebSocketHandler):
 
     @tornado.gen.coroutine
     def _on_message(self, websocket_msg):
+        if self.webserver._test_latency:
+            yield tornado.gen.sleep(self.webserver._test_latency)
         msg_id = 'invalid'
         encoding = Encoding()
         try:
@@ -79,10 +84,11 @@ class WebSocketHandler(tornado.websocket.WebSocketHandler):
 
             last_progress = None
 
-            def progress(f, from_current_ioloop=False):
+            def progress(f):
                 nonlocal last_progress
 
-                def do():
+                def send_progress():
+                    vaex.asyncio.check_patch_tornado()  # during testing asyncio might be patched
                     nonlocal last_progress
                     logger.debug("progress: %r", f)
                     last_progress = f
@@ -90,10 +96,8 @@ class WebSocketHandler(tornado.websocket.WebSocketHandler):
                 # emit when it's the first time (None), at least 0.05 sec lasted, or and the end
                 # but never send old or same values
                 if (last_progress is None or (f - last_progress) > 0.05 or f == 1.0) and (last_progress is None or f > last_progress):
-                    if from_current_ioloop:
-                        return do()
-                    else:
-                        self.webserver.ioloop.add_callback(do)
+                    self.webserver.ioloop.add_callback(send_progress)
+                return True
 
             command = msg['command']
             if command == 'list':
@@ -111,7 +115,9 @@ class WebSocketHandler(tornado.websocket.WebSocketHandler):
                     results = yield self.service.execute(df, tasks, progress=progress)
                 finally:
                     del self._msg_id_to_tasks[msg_id]
-                yield progress(1, from_current_ioloop=True)
+                # make sure the final progress value is send, and also old values are not send
+                last_progress = 1.0
+                self.write_json({'msg_id': msg_id, 'msg': {'progress': 1.0}})
                 encoding = Encoding()
                 results = encoding.encode_list('vaex-task-result', results)
                 self.write_json({'msg_id': msg_id, 'msg': {'result': results}}, encoding)
@@ -147,7 +153,10 @@ class WebSocketHandler(tornado.websocket.WebSocketHandler):
     def write_json(self, msg, encoding=None):
         encoding = encoding or Encoding()
         logger.debug("writing json: %r", msg)
-        return self.write_message(serialize(msg, encoding), binary=True)
+        try:
+            return self.write_message(serialize(msg, encoding), binary=True)
+        except:  # noqa
+            logger.exception('Failed to write: %s', msg)
 
     def on_close(self):
         logger.debug("WebSocket closed")
@@ -158,10 +167,11 @@ GB = MB * 1024
 
 
 class WebServer(threading.Thread):
-    def __init__(self, address="localhost", port=9000, webserver_thread_count=2, cache_byte_size=500 * MB,
-                 token=None, token_trusted=None,
+    def __init__(self, address="127.0.0.1", port=9000, webserver_thread_count=2, cache_byte_size=500 * MB,
+                 token=None, token_trusted=None, base_url=None,
                  cache_selection_byte_size=500 * MB, datasets=[], compress=True, development=False, threads_per_job=4):
         threading.Thread.__init__(self)
+        self._test_latency = None  # for testing purposes
         self.setDaemon(True)
         self.address = address
         self.port = port
@@ -169,6 +179,12 @@ class WebServer(threading.Thread):
         self.service = None
         self.webserver_thread_count = webserver_thread_count
         self.threads_per_job = threads_per_job
+        self.base_url = base_url
+        if self.base_url is None:
+            if self.port == 80:
+                self.base_url = f'{self.address}'
+            else:
+                self.base_url = f'{self.address}:{self.port}'
 
         self.service_bare = vaex.server.service.Service({})
         self.service_threaded = vaex.server.service.AsyncThreadedService(self.service_bare, self.webserver_thread_count,
@@ -219,7 +235,7 @@ class WebServer(threading.Thread):
         self.started.wait()
         logger.debug("make tornado io loop the main thread's current")
         # this will make the main thread use this ioloop as current
-        self.ioloop.make_current()
+        # self.ioloop.make_current()
 
     def run(self):
         self.mainloop()
@@ -251,7 +267,7 @@ class WebServer(threading.Thread):
         logger.debug("stop server")
         self.server.stop()
         logger.debug("stop io loop")
-        self.ioloop.stop()
+        # self.ioloop.stop()
         self.service.stop()
         # for thread_pool in self.thread_pools:
         #     thread_pool.shutdown()
@@ -270,11 +286,12 @@ threads_per_job: 4
 """
 
 
-def main(argv):
+def main(argv, WebServer=WebServer):
 
     parser = argparse.ArgumentParser(argv[0])
     parser.add_argument("filename", help="filename for dataset", nargs='*')
     parser.add_argument("--address", help="address to bind the server to (default: %(default)s)", default="0.0.0.0")
+    parser.add_argument("--base-url", help="External base url (default is <address>:port)", default=None)
     parser.add_argument("--port", help="port to listen on (default: %(default)s)", type=int, default=9000)
     parser.add_argument('--verbose', '-v', action='count', default=2)
     parser.add_argument('--cache', help="cache size in bytes for requests, set to zero to disable (default: %(default)s)", type=int, default=500000000)
@@ -306,7 +323,7 @@ def main(argv):
     logger.info("datasets:")
     for dataset in datasets:
         logger.info("\thttp://%s:%d/%s or ws://%s:%d/%s", config.address, config.port, dataset.name, config.address, config.port, dataset.name)
-    server = WebServer(datasets=datasets, address=config.address, port=config.port, cache_byte_size=config.cache,
+    server = WebServer(datasets=datasets, address=config.address, base_url=config.base_url, port=config.port, cache_byte_size=config.cache,
                        token=config.token, token_trusted=config.token_trusted,
                        compress=config.compress, development=config.development,
                        threads_per_job=config.threads_per_job)

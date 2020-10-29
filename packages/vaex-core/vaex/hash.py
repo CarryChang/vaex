@@ -1,5 +1,4 @@
 import os
-from .column import str_type
 
 
 on_rtd = os.environ.get('READTHEDOCS', None) == 'True'
@@ -10,7 +9,8 @@ if not on_rtd:
 
 
 def counter_type_from_dtype(dtype, transient=True):
-    if dtype == str_type:
+    from .array_types import is_string_type
+    if is_string_type(dtype):
         if transient:
             postfix = 'string'
         else:
@@ -19,11 +19,14 @@ def counter_type_from_dtype(dtype, transient=True):
         postfix = str(dtype)
         if postfix == '>f8':
             postfix = 'float64'
+        if postfix == 'double':  # arrow
+            postfix = 'float64'
     name = 'counter_' + postfix
     return globals()[name]
 
 def ordered_set_type_from_dtype(dtype, transient=True):
-    if dtype == str_type:
+    from .array_types import is_string_type
+    if is_string_type(dtype):
         if transient:
             postfix = 'string'
         else:
@@ -36,7 +39,8 @@ def ordered_set_type_from_dtype(dtype, transient=True):
     return globals()[name]
 
 def index_type_from_dtype(dtype, transient=True):
-    if dtype == str_type:
+    from .array_types import is_string_type
+    if is_string_type(dtype):
         if transient:
             postfix = 'string'
         else:

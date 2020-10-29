@@ -39,6 +39,7 @@ def open(path, *args, **kwargs):
             break
     if dataset_class:
         dataset = dataset_class(path, *args, **kwargs)
+        return vaex.dataframe.DataFrameLocal(dataset)
         return dataset
 
 
@@ -48,5 +49,7 @@ def dup(file):
         return file.dup()
     elif vaex.file.s3.s3fs is not None and isinstance(file, vaex.file.s3.s3fs.core.S3File):
         return vaex.file.s3.dup(file)
+    elif vaex.file.gcs.gcsfs is not None and isinstance(file, vaex.file.gcs.gcsfs.core.GCSFile):
+        return vaex.file.gcs.dup(file)
     else:
         return normal_open(file.name, file.mode)

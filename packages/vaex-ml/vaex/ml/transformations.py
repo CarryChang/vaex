@@ -5,6 +5,8 @@ from . import generate
 from .state import HasState
 import traitlets
 from vaex.utils import _ensure_strings_from_expressions
+import numpy as np
+import warnings
 
 help_features = 'List of features to transform.'
 help_prefix = 'Prefix for the names of the transformed features.'
@@ -158,7 +160,7 @@ class LabelEncoder(Transformer):
         '''
 
         for feature in self.features:
-            labels = df[feature].unique().tolist()
+            labels = vaex.array_types.tolist(df[feature].unique())
             self.labels_[feature] = dict(zip(labels, np.arange(len(labels))))
 
     def transform(self, df):
@@ -225,9 +227,15 @@ class OneHotEncoder(Transformer):
         uniques = []
         for i in self.features:
             expression = _ensure_strings_from_expressions(i)
-            unique = df.unique(expression)
-            unique = np.sort(unique)  # this can/should be optimized with @delay
-            uniques.append(unique.tolist())
+            unique_values = vaex.array_types.tolist(df.unique(expression))
+
+            if None in unique_values:
+                unique_values.remove(None)
+                unique_values.sort()
+                unique_values.insert(0, None)  # This is done in place
+            else:
+                unique_values.sort()
+            uniques.append(unique_values)
         self.uniques_ = uniques
 
     def transform(self, df):
@@ -241,9 +249,14 @@ class OneHotEncoder(Transformer):
         # for each feature, add a virtual column for each unique entry
         for i, feature in enumerate(self.features):
             for j, value in enumerate(self.uniques_[i]):
-                column_name = self.prefix + feature + '_' + str(value)
-                copy.add_virtual_column(column_name, 'where({feature} == {value}, {one}, {zero})'.format(
-                                        feature=feature, value=repr(value), one=self.one, zero=self.zero))
+                str_value = str(value) if value is not None else 'missing'
+                column_name = self.prefix + feature + '_' + str_value
+                if value is None:
+                    copy[column_name] = copy.func.where(copy[feature].ismissing(), self.one, self.zero)
+                elif isinstance(value, np.float) and np.isnan(value):
+                    copy[column_name] = copy.func.where(copy[feature].isnan(), self.one, self.zero)
+                else:
+                    copy[column_name] = copy.func.where(copy[feature] == value, self.one, self.zero)
         return copy
 
 
@@ -366,13 +379,13 @@ class StandardScaler(Transformer):
         '''
 
         copy = df.copy()
-        for i in range(len(self.features)):
-            name = self.prefix+self.features[i]
-            expression = copy[self.features[i]]
+        for i, feature in enumerate(self.features):
+            name = self.prefix+feature
+            expression = copy[feature]
             if self.with_mean:
-                expression = expression - self.mean_[i]
+                expression -= self.mean_[i]
             if self.with_std:
-                expression = expression / self.std_[i]
+                expression /= self.std_[i]
             copy[name] = expression
         return copy
 
@@ -402,6 +415,7 @@ class MinMaxScaler(Transformer):
      3    2    0           0                  0.166667
      4   15   10           1                  1
     '''
+    snake_name = 'minmax_scaler'
     # title = Unicode(default_value='MinMax Scaler', read_only=True).tag(ui='HTML')
     feature_range = traitlets.Tuple(default_value=(0, 1), help='The range the features are scaled to.').tag().tag(ui='FloatRangeSlider')
     prefix = traitlets.Unicode(default_value="minmax_scaled_", help=help_prefix).tag(ui='Text')
@@ -415,10 +429,17 @@ class MinMaxScaler(Transformer):
         :param df: A vaex DataFrame.
         '''
 
-        assert len(self.feature_range) == 2, 'feature_range must have 2 elements only'
-        minmax = df.minmax(self.features)
-        self.fmin_ = minmax[:, 0].tolist()
-        self.fmax_ = minmax[:, 1].tolist()
+        minmax = []
+        for feat in self.features:
+            minmax.append(df.minmax(feat, delay=True))
+
+        @vaex.delayed
+        def assign(minmax):
+            self.fmin_ = [elem[0] for elem in minmax]
+            self.fmax_ = [elem[1] for elem in minmax]
+
+        assign(minmax)
+        df.execute()
 
     def transform(self, df):
         '''
@@ -432,11 +453,11 @@ class MinMaxScaler(Transformer):
 
         copy = df.copy()
 
-        for i in range(len(self.features)):
-            name = self.prefix + self.features[i]
+        for i, feature in enumerate(self.features):
+            name = self.prefix + feature
             a = self.feature_range[0]
             b = self.feature_range[1]
-            expr = copy[self.features[i]]
+            expr = copy[feature]
             expr = (b-a)*(expr-self.fmin_[i])/(self.fmax_[i]-self.fmin_[i]) + a
             copy[name] = expr
         return copy
@@ -492,9 +513,9 @@ class MaxAbsScaler(Transformer):
         '''
 
         copy = df.copy()
-        for i in range(len(self.features)):
-            name = self.prefix + self.features[i]
-            expr = copy[self.features[i]]
+        for i, feature in enumerate(self.features):
+            name = self.prefix + feature
+            expr = copy[feature]
             expr = expr / self.absmax_[i]
             copy[name] = expr
         return copy
@@ -564,13 +585,13 @@ class RobustScaler(Transformer):
         '''
 
         copy = df.copy()
-        for i in range(len(self.features)):
-            name = self.prefix+self.features[i]
-            expr = copy[self.features[i]]
+        for i, feature in enumerate(self.features):
+            name = self.prefix+feature
+            expr = copy[feature]
             if self.with_centering:
-                expr = expr - self.center_[i]
+                expr -= self.center_[i]
             if self.with_scaling:
-                expr = expr / self.scale_[i]
+                expr /= self.scale_[i]
             copy[name] = expr
         return copy
 
@@ -587,11 +608,6 @@ class CycleTransformer(Transformer):
     Suitable for a variaty of machine learning tasks.
     It preserves the cyclical continuity of the feature.
     Inspired by: http://blog.davidkaleko.com/feature-engineering-cyclical-features.html
-
-    Example:
-
-    >>> import vaex
-    >>> import vaex.ml
     >>> df = vaex.from_arrays(days=[0, 1, 2, 3, 4, 5, 6])
     >>> cyctrans = vaex.ml.CycleTransformer(n=7, features=['days'])
     >>> cyctrans.fit_transform(df)
@@ -636,6 +652,8 @@ class CycleTransformer(Transformer):
         return copy
 
 
+@register
+@generate.register
 class BayesianTargetEncoder(Transformer):
     '''Encode categorical variables with a Bayesian Target Encoder.
 
@@ -705,6 +723,9 @@ class BayesianTargetEncoder(Transformer):
                                            allow_missing=True)
         return copy
 
+
+@register
+@generate.register
 class WeightOfEvidenceEncoder(Transformer):
     '''Encode categorical variables with a Weight of Evidence Encoder.
 
@@ -756,6 +777,7 @@ class WeightOfEvidenceEncoder(Transformer):
             # Instead of counting the goods and bad, we divide by the count
             # which reduces to the mean
             agg = df.groupby(feature, agg={'positive': vaex.agg.mean(self.target)})
+            agg['positive'] = agg.func.where(agg['positive'] == 0, self.epsilon, agg['positive'])
             agg['negative'] = 1 - agg.positive
             agg['negative'] = agg.func.where(agg['negative'] == 0, self.epsilon, agg['negative'])
             agg['woe'] = np.log(agg.positive/agg.negative)
@@ -779,3 +801,203 @@ class WeightOfEvidenceEncoder(Transformer):
                                            allow_missing=True)
 
         return copy
+
+
+@register
+@generate.register
+class KBinsDiscretizer(Transformer):
+    '''Bin continous features into discrete bins.
+
+    A stretegy to encode continuous features into discrete bins. The transformed
+    columns contain the bin label each sample falls into. In a way this
+    transformer Label/Ordinal encodes continous features.
+
+    Example:
+
+    >>> import vaex
+    >>> import vaex.ml
+    >>> df = vaex.from_arrays(x=[0, 2.5, 5, 7.5, 10, 12.5, 15])
+    >>> bin_trans = vaex.ml.KBinsDiscretizer(features=['x'], n_bins=3, strategy='uniform')
+    >>> bin_trans.fit_transform(df)
+      #     x    binned_x
+      0   0             0
+      1   2.5           0
+      2   5             1
+      3   7.5           1
+      4  10             2
+      5  12.5           2
+      6  15             2
+    '''
+    snake_name = 'kbins_discretizer'
+    n_bins = traitlets.Int(allow_none=False, default_value=5, help='Number of bins. Must be greater than 1.')
+    strategy = traitlets.Enum(values=['uniform', 'quantile', 'kmeans'], default_value='uniform', help='Strategy used to define the widths of the bins.')
+    prefix = traitlets.Unicode(default_value='binned_', help=help_prefix)
+    epsilon = traitlets.Float(default_value=1e-8, allow_none=False, help='Tiny value added to the bin edges ensuring samples close to the bin edges are binned correcly.')
+    n_bins_ = traitlets.Dict(help='Number of bins per feature.').tag(output=True)
+    bin_edges_ = traitlets.Dict(help='The bin edges for each binned feature').tag(output=True)
+
+    def fit(self, df):
+        '''
+        Fit KBinsDiscretizer to the DataFrame.
+
+        :param df: A vaex DataFrame.
+        '''
+
+        # We need at least two bins to do the transformations
+        assert self.n_bins > 1, ' Kwarg `n_bins` must be greated than 1.'
+
+        # Find the extent of the features
+        minmax = []
+        minmax_promise = []
+        for feat in self.features:
+            minmax_promise.append(df.minmax(feat, delay=True))
+
+        @vaex.delayed
+        def assign(minmax_promise):
+            for elem in minmax_promise:
+                minmax.append(elem)
+
+        assign(minmax_promise)
+        df.execute()
+
+        # warning: everyting is cast to float, which is unavoidable due to the addition of self.epsilon
+        minmax = np.array(minmax)
+        minmax[:, 1] = minmax[:, 1] + self.epsilon
+
+        # # Determine the bin edges and number of bins depending on the strategy per feature
+        if self.strategy == 'uniform':
+            bin_edges = {feat: np.linspace(minmax[i, 0], minmax[i, 1], self.n_bins+1) for i, feat in enumerate(self.features)}
+
+        elif self.strategy == 'quantile':
+            percentiles = np.linspace(0, 100, self.n_bins + 1)
+            bin_edges = df.percentile_approx(self.features, percentage=percentiles)
+            bin_edges = {feat: edges for feat, edges in zip(self.features, bin_edges)}
+
+        else:
+            from .cluster import KMeans
+
+            bin_edges = {}
+            for i, feat in enumerate(self.features):
+
+                # Deterministic initialization with uniform spacing
+                uniform_edges = np.linspace(minmax[i, 0], minmax[i, 1], self.n_bins+1)
+                centers_init = ((uniform_edges[1:] + uniform_edges[:-1]) * 0.5).tolist()
+                centers_init = [[elem] for elem in centers_init]
+
+                # KMeans strategy
+                km = KMeans(n_clusters=self.n_bins, init=centers_init, n_init=1, features=[feat])
+                km.fit(df)
+                # Get and sort the centres of the kmeans clusters
+                centers = np.sort(np.array(km.cluster_centers).flatten())
+                # Put the bin edges half way between each center (ignoring the outermost edges)
+                be = (centers[1:] + centers[:-1]) * 0.5
+                # The outermost edges are defined by the min/max of each feature
+                # Quickly build a numpy array by concat individual values (min/max) and arrays (be)
+                bin_edges[feat] = np.r_[minmax[i, 0], be, minmax[i, 1]]
+
+        # Remove bins whose width are too small (i.e., <= 1e-8)
+        n_bins = {}  # number of bins per features that are actually used
+        for feat in self.features:
+            mask = np.diff(bin_edges[feat], append=np.inf) > 1e-8
+            be = bin_edges[feat][mask]
+            if len(be) - 1 != self.n_bins:
+                warnings.warn(f'Bins whose width are too small (i.e., <= 1e-8) in   {feat} are removed.'
+                              f'Consider decreasing the number of bins.')
+                bin_edges[feat] = be
+            n_bins[feat] = len(be) - 1
+
+        self.bin_edges_ = bin_edges
+        self.n_bins_ = n_bins
+
+    def transform(self, df):
+        '''
+        Transform a DataFrame with a fitted KBinsDiscretizer.
+
+        :param df: A vaex DataFrame.
+
+        :returns copy: a shallow copy of the DataFrame that includes the binned features.
+        :rtype: DataFrame
+        '''
+
+        df = df.copy()
+
+        for feat in self.features:
+            name = self.prefix + feat
+            # Samples outside the bin range are added to the closest bin
+            df[name] = (df[feat].digitize(self.bin_edges_[feat]) - 1).clip(0, self.n_bins_[feat] - 1)
+
+        return df
+
+
+@register
+@generate.register
+class GroupByTransformer(Transformer):
+    '''The GroupByTransformer creates aggregations via the groupby operation, which are
+    joined to a DataFrame. This is useful for creating aggregate features.
+
+    Example:
+
+    >>> import vaex
+    >>> import vaex.ml
+    >>> df_train = vaex.from_arrays(x=['dog', 'dog', 'dog', 'cat', 'cat'], y=[2, 3, 4, 10, 20])
+    >>> df_test = vaex.from_arrays(x=['dog', 'cat', 'dog', 'mouse'], y=[5, 5, 5, 5])
+    >>> group_trans = vaex.ml.GroupByTransformer(by='x', agg={'mean_y': vaex.agg.mean('y')}, rsuffix='_agg')
+    >>> group_trans.fit_transform(df_train)
+      #  x      y  x_agg      mean_y
+      0  dog    2  dog             3
+      1  dog    3  dog             3
+      2  dog    4  dog             3
+      3  cat   10  cat            15
+      4  cat   20  cat            15
+    >>> group_trans.transform(df_test)
+      #  x        y  x_agg    mean_y
+      0  dog      5  dog      3.0
+      1  cat      5  cat      15.0
+      2  dog      5  dog      3.0
+      3  mouse    5  --       --
+    '''
+
+    snake_name = 'groupby_transformer'
+    by = traitlets.Unicode(allow_none=False, help='The feature on which to do the grouping.')
+    agg = traitlets.Dict(help='Dict where the keys are feature names and the values are vaex.agg objects.')
+    rprefix = traitlets.Unicode(default_value='', help='Prefix for the names of the aggregate features in case of a collision.')
+    rsuffix = traitlets.Unicode(default_value='', help='Suffix for the names of the aggregate features in case of a collision.')
+    df_group_ = traitlets.Instance(klass=vaex.dataframe.DataFrame, allow_none=True)
+
+    def fit(self, df):
+        '''
+        Fit GroupByTransformer to the DataFrame.
+
+        :param df: A vaex DataFrame.
+        '''
+
+        if not self.agg:
+            raise ValueError('You have to specify a dict for the `agg` keyword.')
+        if len(self.by)==0:
+            raise ValueError('Please specify a value for the `by` keyword.')
+        self.df_group_ = df.groupby(by=self.by, agg=self.agg)
+
+    def transform(self, df):
+        '''
+        Transform a DataFrame with a fitted GroupByTransformer.
+
+        :param df: A vaex DataFrame.
+
+        :returns copy: a shallow copy of the DataFrame that includes the aggregated features.
+        :rtype: DataFrame
+        '''
+
+        df = df.copy()
+        # We effectively want to do a join, but since that is not part of the state, it will not be state
+        # transferrable, instead we implement this with map
+        # df = df.join(other=self.df_group_, on=self.by, how='left', rprefix=self.rprefix, rsuffix=self.rsuffix)
+        key_values = self.df_group_[self.by].tolist()
+        for name in self.df_group_.get_column_names():
+            if name == self.by:
+                continue  # we don't need to include the column we group/join on
+            mapper = dict(zip(key_values, self.df_group_[name].values))
+            join_name = name
+            if join_name in df:
+                join_name = self.rprefix + join_name + self.rsuffix
+            df[join_name] = df[self.by].map(mapper, allow_missing=True)
+        return df

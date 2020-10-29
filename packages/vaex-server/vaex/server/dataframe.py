@@ -27,20 +27,22 @@ def _rmi(f=None):
 # TODO: we should not inherit from local
 class DataFrameRemote(DataFrame):
     def __init__(self, name, column_names, dtypes, length_original):
-        super(DataFrameRemote, self).__init__(name, '', column_names)
+        super(DataFrameRemote, self).__init__(name)
+        self.column_names = column_names
         self._dtypes = dtypes
         for column_name in self.get_column_names(virtual=True, strings=True):
             self._save_assign_expression(column_name)
         self._length_original = length_original
         self._length_unfiltered = length_original
         self._index_end = length_original
+        self._dtype_cache = {}
         self.fraction = 1
 
     def is_local(self):
         return False
 
     def copy(self, column_names=None, virtual=True):
-        dtypes = {name: self.dtype(name) for name in self.get_column_names(strings=True, virtual=False)}
+        dtypes = {name: self.data_type(name) for name in self.get_column_names(strings=True, virtual=False)}
         df = DataFrameRemote(self.name, self.column_names, dtypes=dtypes, length_original=self._length_original)
         df.executor = self.executor
         state = self.state_get()
@@ -73,11 +75,14 @@ class DataFrameRemote(DataFrame):
         return (rows,)
         # return (rows,) + sample.shape[1:]
 
-    def dtype(self, expression, internal=False):
+    def data_type(self, expression, internal=False,  array_type=None):
         if str(expression) in self._dtypes:
             return self._dtypes[str(expression)]
         else:
-            return super().dtype(expression)
+            if str(expression) not in self._dtype_cache:
+                self._dtype_cache[str(expression)] = super().data_type(expression, array_type=array_type)
+            # TODO: invalidate cache
+            return self._dtype_cache[str(expression)]
 
     # TODO: would be nice to get some info on the remote dataframe
     # def __repr__(self):

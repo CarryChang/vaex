@@ -2,6 +2,7 @@ import pytest
 import vaex
 import numpy as np
 import numpy.ma
+from common import small_buffer
 
 df_a = vaex.from_arrays(a=np.array(['A', 'B', 'C']),
                         x=np.array([0., 1., 2.]),
@@ -40,14 +41,14 @@ df_e = vaex.from_arrays(a=np.array(['X', 'Y', 'Z']),
 def test_no_on():
     # just adds the columns
     df = df_a.join(df_b, rsuffix='_r')
-    assert df.columns['b'] is df_b.columns['b']
+    assert df.dataset.right._columns['b'] is df_b.dataset._columns['b']
 
 
 def test_join_masked():
     df = df_a.join(other=df_b, left_on='m', right_on='m', rsuffix='_r')
     assert df.evaluate('m').tolist() == [1, None, 3]
     assert df.evaluate('m_r').tolist() == [1, None, None]
-    assert df.columns['m_r'].indices.dtype == np.int8
+    assert df.dataset.right._columns['m_r'].indices.dtype == np.int8
 
 
 def test_join_nomatch():
@@ -57,6 +58,19 @@ def test_join_nomatch():
 
 def test_left_a_b():
     df = df_a.join(other=df_b, left_on='a', right_on='b', rsuffix='_r')
+    assert df['a'].tolist() == ['A', 'B', 'C']
+    assert df['b'].tolist() == ['A', 'B', None]
+    assert df['x'].tolist() == [0, 1, 2]
+    assert df['x_r'].tolist() == [2, 1, None]
+    assert df['y'].tolist() == [0, None, 2]
+    assert df['y_r'].tolist() == [None, 1, None]
+
+def test_left_a_b_as_alias():
+    df_ac = df_a.copy()
+    df_bc = df_b.copy()
+    df_ac['1'] = df_ac['a']
+    df_bc['2'] = df_bc['b']
+    df = df_ac.join(other=df_bc, left_on='1', right_on='2', rsuffix='_r')
     assert df.evaluate('a').tolist() == ['A', 'B', 'C']
     assert df.evaluate('b').tolist() == ['A', 'B', None]
     assert df.evaluate('x').tolist() == [0, 1, 2]
@@ -68,60 +82,77 @@ def test_left_a_b():
 def test_join_indexed():
     df = df_a.join(other=df_b, left_on='a', right_on='b', rsuffix='_r')
     df_X = df_a.join(df, left_on='a', right_on='b', rsuffix='_r')
-    assert df_X.evaluate('b').tolist() == ['A', 'B', None]
+    assert df_X['b'].tolist() == ['A', 'B', None]
 
 
 def test_left_a_b_filtered():
     df_af = df_a[df_a.x > 0]
     df = df_af.join(other=df_b, left_on='a', right_on='b', rsuffix='_r')
-    assert df.evaluate('a').tolist() == ['B', 'C']
-    assert df.evaluate('b').tolist() == ['B', None]
-    assert df.evaluate('x').tolist() == [1, 2]
-    assert df.evaluate('x_r').tolist() == [1, None]
-    assert df.evaluate('y').tolist() == [None, 2]
-    assert df.evaluate('y_r').tolist() == [1, None]
+    assert df['a'].tolist() == ['B', 'C']
+    assert df['b'].tolist() == ['B', None]
+    assert df['x'].tolist() == [1, 2]
+    assert df['x_r'].tolist() == [1, None]
+    assert df['y'].tolist() == [None, 2]
+    assert df['y_r'].tolist() == [1, None]
 
     # actually, even though the filter is applied, all rows will be matched
     # since the filter can change
-    df.set_selection(None, vaex.dataset.FILTER_SELECTION_NAME)
-    assert df.evaluate('a').tolist() == ['A', 'B', 'C']
-    assert df.evaluate('b').tolist() == ['A', 'B', None]
-    assert df.evaluate('x').tolist() == [0, 1, 2]
-    assert df.evaluate('x_r').tolist() == [2, 1, None]
-    assert df.evaluate('y').tolist() == [0, None, 2]
-    assert df.evaluate('y_r').tolist() == [None, 1, None]
+    df.set_selection(None, vaex.dataframe.FILTER_SELECTION_NAME)
+    assert df['a'].tolist() == ['A', 'B', 'C']
+    assert df['b'].tolist() == ['A', 'B', None]
+    assert df['x'].tolist() == [0, 1, 2]
+    assert df['x_r'].tolist() == [2, 1, None]
+    assert df['y'].tolist() == [0, None, 2]
+    assert df['y_r'].tolist() == [None, 1, None]
 
     # if we extract, that shouldn't be the case
     df_af = df_a[df_a.x > 0].extract()
     df = df_af.join(other=df_b, left_on='a', right_on='b', rsuffix='_r')
-    df.set_selection(None, vaex.dataset.FILTER_SELECTION_NAME)
-    assert df.evaluate('a').tolist() == ['B', 'C']
-    assert df.evaluate('b').tolist() == ['B', None]
-    assert df.evaluate('x').tolist() == [1, 2]
-    assert df.evaluate('x_r').tolist() == [1, None]
-    assert df.evaluate('y').tolist() == [None, 2]
-    assert df.evaluate('y_r').tolist() == [1, None]
+    df.set_selection(None, vaex.dataframe.FILTER_SELECTION_NAME)
+    assert df['a'].tolist() == ['B', 'C']
+    assert df['b'].tolist() == ['B', None]
+    assert df['x'].tolist() == [1, 2]
+    assert df['x_r'].tolist() == [1, None]
+    assert df['y'].tolist() == [None, 2]
+    assert df['y_r'].tolist() == [1, None]
 
 
 def test_inner_a_b_filtered():
     df_a_filtered = df_a[df_a.x > 0]
     df = df_a_filtered.join(other=df_b, left_on='a', right_on='b', rsuffix='_r', how='inner')
-    assert df.evaluate('a').tolist() == ['B']
-    assert df.evaluate('b').tolist() == ['B']
-    assert df.evaluate('x').tolist() == [1]
-    assert df.evaluate('x_r').tolist() == [1]
-    assert df.evaluate('y').tolist() == [None]
-    assert df.evaluate('y_r').tolist() == [1]
+    assert df['a'].tolist() == ['B']
+    assert df['b'].tolist() == ['B']
+    assert df['x'].tolist() == [1]
+    assert df['x_r'].tolist() == [1]
+    assert df['y'].tolist() == [None]
+    assert df['y_r'].tolist() == [1]
+
+
+def test_left_a_b_filtered_right():
+    # similar to test_left_a_b_filtered, but now the df we join is filtered
+    # take b without the last tow
+    df_bf = df_b[df_b.b.str.contains('A|B')]
+    df = df_a.join(df_bf, how='left', on='x', rsuffix='_r')
+    # columns of the left df
+    assert df.x.tolist() == [0, 1, 2]
+    assert df.a.tolist() == ['A', 'B', 'C']
+    assert df.y.tolist() == [0, None, 2]
+    assert df.m.tolist() == [1, None, 3]
+    # columns of the right df
+    assert df.b.tolist() == [None, 'B', 'A']
+    assert df.x_r.tolist() == [None, 1, 2]
+    assert df.y_r.tolist() == [None, 1, None]
+    assert df.m_r.tolist() == [None, 1, None]
 
 
 def test_right_x_x():
     df = df_a.join(other=df_b, on='x', rsuffix='_r', how='right')
-    assert df.evaluate('a').tolist() == ['C', 'B', 'A']
-    assert df.evaluate('b').tolist() == ['A', 'B', 'D']
-    assert df.evaluate('x').tolist() == [2, 1, 0]
-    assert df.evaluate('x_r').tolist() == [2, 1, 0]
-    assert df.evaluate('y').tolist() == [2, None, 0]
-    assert df.evaluate('y_r').tolist() == [None, 1, 2]
+    assert df['a'].tolist() == ['C', 'B', 'A']
+    assert df['b'].tolist() == ['A', 'B', 'D']
+    assert df['x'].tolist() == [2, 1, 0]
+    assert df['x_r'].tolist() == [2, 1, 0]
+    assert df['y'].tolist() == [2, None, 0]
+    assert df['y_r'].tolist() == [None, 1, 2]
     assert 'y_r' not in df_b
 
 
@@ -215,7 +246,7 @@ def test_join_duplicate_column():
     df = df_left.join(df_right, on='index')
     assert df.column_count() == 3
     assert set(df.column_names) == {'index', 'x', 'y'}
-    assert df['index'] == [1, 2, 3]
+    assert df['index'].tolist() == [1, 2, 3]
     assert df.x.tolist() == [10, 20, 30]
     assert df.y.tolist() == [0.1, 0.2, 0.3]
 
@@ -258,3 +289,19 @@ def test_join_variables():
     assert df.r_x_rhs.values[0] == 2
     assert df.yy.values[0] == 3
     assert df.r_z_rhs.values[0] == 2*3 + 3*4
+
+
+def test_with_masked_no_short_circuit():
+    # this test that the full table is joined, in some rare condition
+    # it can happen that the left table has a value not present in the right
+    # which causes it to not evaluate the other lookups, due to Python's short circuit
+    # behaviour. E.g. True or func() will not call func
+    N = 1000
+    df = vaex.from_arrays(i=np.arange(100) % 10)
+    df_right = vaex.from_arrays(i=np.arange(9), j=np.arange(9))
+    with small_buffer(df, size=1):
+        dfj = df.join(other=df_right, on='i')
+    assert dfj.dataset.right._columns['j'].masked
+    assert dfj[:10].dataset.right._columns['j'].masked
+    assert dfj['j'][:10].tolist() == [0, 1, 2, 3, 4, 5, 6, 7, 8, None]
+    dfj['j'].tolist()  # make sure we can evaluate the whole column

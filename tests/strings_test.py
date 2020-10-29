@@ -4,6 +4,7 @@ import re
 
 import vaex
 import numpy as np
+import pyarrow as pa
 import pytest
 
 
@@ -23,24 +24,37 @@ def test_format():
     assert df.text.format('pre-%s-post').tolist() == ['pre-%s-post' % k for k in text]
 
 
-@pytest.mark.skipif(sys.version_info < (3, 3), reason="requires python3.4 or higher")
 def test_dtype_object_string(tmpdir):
+    # CHANGE: before vaex v4 we worked with dtype object, now we lazily cast to arrow
     x = np.arange(8, 12)
     s = np.array(list(map(str, x)), dtype='O')
     df = vaex.from_arrays(x=x, s=s)
-    assert df.columns['s'].dtype.kind == 'O'
+    assert df.columns['s'].type == pa.string()
     path = str(tmpdir.join('test.arrow'))
     df.export(path)
-    df_read = vaex.open(path)
-    # the data type of s can be different
-    assert df_read.compare(df) == ([], [], [], [])
+    df_read = vaex.open(path, as_numpy=False)
+    # the data type of x is different (arrow vs numpy)
+    assert df_read.compare(df) == ([], [], ['x'], [])
+
+
+def test_dtype_unicode_string(tmpdir):
+    # CHANGE: before vaex v4 we worked with unicode, now we lazily cast to arrow
+    x = np.arange(8, 12)
+    s = np.array(list(map(str, x)), dtype='U')
+    df = vaex.from_arrays(x=x, s=s)
+    assert df.columns['s'].type == pa.string()
+    path = str(tmpdir.join('test.arrow'))
+    df.export(path)
+    df_read = vaex.open(path, as_numpy=False)
+    # the data type of x is different (arrow vs numpy)
+    assert df_read.compare(df) == ([], [], ['x'], [])
 
 
 def test_export_arrow_strings_to_hdf5(tmpdir):
     df = vaex.from_arrays(names=np.array(['hi', 'is', 'l2', np.nan], dtype='O'))
     path = str(tmpdir.join('test.arrow'))
     df.export(path)
-    df_read_arrow = vaex.open(path)
+    df_read_arrow = vaex.open(path, as_numpy=False)
     path = str(tmpdir.join('test.hdf5'))
     df.export(path)
     df_read_hdf5 = vaex.open(path)
@@ -51,7 +65,7 @@ def test_arrow_strings_concat(tmpdir):
     df = vaex.from_arrays(names=['hi', 'is', 'l2'])
     path = str(tmpdir.join('test.arrow'))
     df.export(path)
-    df_read_arrow = vaex.open(path)
+    df_read_arrow = vaex.open(path, as_numpy=False)
     path = str(tmpdir.join('test.hdf5'))
     df_read_arrow.export(path)
     df_read_hdf5 = vaex.open(path)
@@ -63,8 +77,8 @@ def test_concat():
     ds2 = vaex.from_arrays(names=['hello', 'this', 'is', 'long'])
     ds = ds1.concat(ds2)
     assert len(ds) == len(ds1) + len(ds2)
-    assert ds.dtype('names') == vaex.column.str_type
-    assert ds.dtype('names') != np.object
+    assert ds.data_type('names') == pa.string()
+    assert ds.data_type('names') != np.object
 
 
 def test_string_count_stat():
@@ -78,7 +92,7 @@ def test_string_count_stat():
     names = vaex.string_column(['hello', 'this', None, 'long'])
     x = np.arange(len(names))
     df = vaex.from_arrays(names=names, x=x)
-    assert df.count(ds.names, binby='x', limits=[0, 100], shape=1).tolist() == [3]
+    assert df.count(df.names, binby='x', limits=[0, 100], shape=1).tolist() == [3]
 
 
 @pytest.mark.skip
@@ -89,9 +103,9 @@ def test_string_dtype_with_none():
 
 def test_unicode():
     ds = vaex.from_arrays(names=['bla\u1234'])
-    assert ds.names.dtype == vaex.column.str_type
+    assert ds.names.dtype == pa.string()
     ds = vaex.from_arrays(names=['bla'])
-    assert ds.names.dtype == vaex.column.str_type
+    assert ds.names.dtype == pa.string()
 
 
 @pytest.mark.skipif(sys.version_info < (3, 3), reason="requires python3.4 or higher")
@@ -101,12 +115,11 @@ def test_concat_mixed():
     # and the other string
     ds1 = vaex.from_arrays(names=['not', 'missing'])
     ds2 = vaex.from_arrays(names=[np.nan, np.nan])
-    assert ds1.dtype(ds1.names) == str
-    assert ds2.dtype(ds2.names) == np.float64
+    assert ds1.data_type(ds1.names) == pa.string()
+    assert ds2.data_type(ds2.names) == np.float64
     ds = ds1.concat(ds2)
     assert len(ds) == len(ds1) + len(ds2)
-    assert ds.dtype(ds.names) == ds1.names.dtype
-
+    assert ds.data_type(ds.names) == ds1.names.dtype
 
 def test_strip():
     ds = vaex.from_arrays(names=['this ', ' has', ' space'])
@@ -118,10 +131,10 @@ def test_strip():
 def test_unicode2(tmpdir):
     path = str(tmpdir.join('utf32.hdf5'))
     ds = vaex.from_arrays(names=["vaex", "or", "væx!"])
-    assert ds.names.dtype == vaex.column.str_type
+    assert ds.names.dtype == pa.string()
     ds.export_hdf5(path)
     ds = vaex.open(path)
-    assert ds.names.dtype == vaex.column.str_type
+    assert ds.names.dtype == pa.string()
     assert ds.names.tolist() == ["vaex", "or", "væx!"]
 
 
@@ -149,6 +162,7 @@ def dfs_arrow(tmp_path_factory):
     df = vaex.from_arrays(s=vaex.string_column(string_list), sr=vaex.string_column(string_list_reverse))
     df.export(path)  # we write it out so that the memory is read only
     return vaex.open(path)
+    return df
 
 
 def test_null_values():
@@ -174,6 +188,10 @@ def test_string_capitalize(dfs):
 def test_string_cat(dfs):
     c = [s1+s2 for s1, s2 in zip(string_list, string_list_reverse)]
     assert dfs.s.str.cat(dfs.sr).tolist() == c
+
+@pytest.mark.xfail(reason='pandas does not like getting an arrow array as argument')
+def test_string_cat(dfs):
+    c = [s1+s2 for s1, s2 in zip(string_list, string_list_reverse)]
     assert dfs.s.str_pandas.cat(dfs.sr).tolist() == c
 
 
@@ -206,7 +224,7 @@ def test_string_find(dfs, sub, start, end):
 
 @pytest.mark.parametrize("i", [-1, 3, 5, 10])
 def test_string_get(dfs, i):
-    x = dfs.s.str_pandas.get(i).tolist()
+    x = dfs.s.str_pandas.get(i).values.tolist()
     assert dfs.s.str.get(i).tolist() == [k[i] if i < len(k) else '' for k in string_list]
 
 
@@ -359,14 +377,15 @@ def test_string_islower(dfs):
     assert dfs.s.str.lower().str.islower().tolist() == dfs.s.str_pandas.lower().str_pandas.islower().tolist()
 
 
+@pytest.mark.parametrize("ascii", [True, False])
+def test_string_istitle(ascii):
+    df = vaex.from_arrays(s=['Title Case', 'no title'])
+    assert df.s.str.istitle(ascii=ascii).tolist() == [True, False]
+
+
 def test_string_isupper(dfs):
     assert dfs.s.str.isupper().tolist() == dfs.s.str_pandas.isupper().tolist()
     assert dfs.s.str.upper().str.isupper().tolist() == dfs.s.str_pandas.upper().str_pandas.isupper().tolist()
-
-
-# def test_string_istitle(dfs):
-#   assert dfs.s.str.istitle().tolist() == dfs.s.str_pandas.istitle().tolist()
-#   assert dfs.s.str.title.istitle().tolist() == dfs.s.str_pandas.title().str_pandas.istitle().tolist()
 
 
 def test_string_isspace(dfs):

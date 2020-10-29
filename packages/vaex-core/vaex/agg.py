@@ -1,7 +1,6 @@
 import os
 import numpy as np
 
-from .column import str_type
 from .stat import _Statistic
 from vaex import encoding
 
@@ -72,7 +71,7 @@ class AggregatorDescriptorBasic(AggregatorDescriptor):
             spec['expression'] = self.expression
         else:
             spec['expression'] = [str(k) for k in self.expressions]
-        if self.selection:
+        if self.selection is not None:
             spec['selection'] = self.selection
         if self.edges:
             spec['edges'] = True
@@ -81,7 +80,7 @@ class AggregatorDescriptorBasic(AggregatorDescriptor):
         return spec
 
     def pretty_name(self, id=None):
-        id = id or "_".join(map(str, self.expression))
+        id = id or "_".join(map(str, self.expressions))
         return '{0}_{1}'.format(id, self.short_name)
 
     def _prepare_types(self, df):
@@ -89,7 +88,7 @@ class AggregatorDescriptorBasic(AggregatorDescriptor):
             self.dtype_in = np.dtype('int64')
             self.dtype_out = np.dtype('int64')
         else:
-            self.dtype_in = df[str(self.expressions[0])].dtype
+            self.dtype_in = df[str(self.expressions[0])].data_type()
             self.dtype_out = self.dtype_in
             if self.short_name == "count":
                 self.dtype_out = np.dtype('int64')
@@ -150,7 +149,7 @@ class AggregatorDescriptorMulti(AggregatorDescriptor):
         self.edges = edges
 
     def pretty_name(self, id=None):
-        id = id or "_".join(map(str, self.expression))
+        id = id or "_".join(map(str, self.expressions))
         return '{0}_{1}'.format(id, self.short_name)
 
 

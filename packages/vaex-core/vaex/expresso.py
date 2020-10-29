@@ -13,14 +13,29 @@ import copy
 import difflib
 
 
+if hasattr(_ast, 'Num'):
+    ast_Num = _ast.Num
+    ast_Str = _ast.Str
+else:  # Python3.8
+    ast_Num = _ast.Constant
+    ast_Str = _ast.Constant
+
+if hasattr(_ast, 'NameConstant'):
+    ast_Constant = _ast.NameConstant
+else:
+    ast_Constant = _ast.Constant
+
+
 logger = logging.getLogger("expr")
 logger.setLevel(logging.ERROR)
 
 
-valid_binary_operators = [_ast.Add, _ast.Sub, _ast.Mult, _ast.Pow,
-                          _ast.Div, _ast.FloorDiv, _ast.BitAnd, _ast.BitOr, _ast.BitXor, _ast.Mod]
+valid_binary_operators = [_ast.Add, _ast.Sub, _ast.Mult, ast.MatMult, _ast.Pow,
+                          _ast.Div, _ast.FloorDiv, _ast.BitAnd, _ast.BitOr, _ast.BitXor, _ast.Mod,
+                          _ast.RShift, _ast.LShift
+                          ]
 valid_compare_operators = [_ast.Lt, _ast.LtE,
-                           _ast.Gt, _ast.GtE, _ast.Eq, _ast.NotEq]
+                           _ast.Gt, _ast.GtE, _ast.Eq, _ast.NotEq, _ast.IsNot, _ast.Is, _ast.In]
 valid_unary_operators = [_ast.USub, _ast.UAdd, _ast.Invert]
 valid_id_characters = string.ascii_letters + string.digits + "_"
 valid_functions = "sin cos".split()
@@ -82,7 +97,6 @@ def validate_expression(expr, variable_set, function_set=[], names=None):
         else:
             raise ValueError("Unary operator not allowed: %r" % expr.op)
     elif isinstance(expr, _ast.Name):
-        validate_id(expr.id)
         if expr.id not in variable_set:
             matches = difflib.get_close_matches(expr.id, list(variable_set))
             msg = "Column or variable %r does not exist." % expr.id
@@ -91,9 +105,9 @@ def validate_expression(expr, variable_set, function_set=[], names=None):
 
             raise NameError(msg)
         names.append(expr.id)
-    elif isinstance(expr, _ast.Num):
+    elif isinstance(expr, ast_Num):
         pass  # numbers are fine
-    elif isinstance(expr, _ast.Str):
+    elif isinstance(expr, ast_Str):
         pass  # as well as strings
     elif isinstance(expr, _ast.Call):
         validate_func(expr.func, function_set)
@@ -111,10 +125,22 @@ def validate_expression(expr, variable_set, function_set=[], names=None):
             validate_expression(comparator, variable_set, function_set, names)
     elif isinstance(expr, _ast.keyword):
         validate_expression(expr.value, variable_set, function_set, names)
+    elif isinstance(expr, ast_Constant):
+        pass  # like True and False
+    elif isinstance(expr, _ast.List):
+        for el in expr.elts:
+            validate_expression(el, variable_set, function_set, names)
+    elif isinstance(expr, _ast.Dict):
+        for key in expr.keys:
+            validate_expression(key, variable_set, function_set, names)
+        for value in expr.values:
+            validate_expression(value, variable_set, function_set, names)
     elif isinstance(expr, _ast.Subscript):
         validate_expression(expr.value, variable_set, function_set, names)
-        if isinstance(expr.slice.value, _ast.Num):
+        if isinstance(expr.slice.value, ast_Num):
             pass  # numbers are fine
+        elif isinstance(expr.slice.value, _ast.Str):
+            pass  # and strings
         else:
             raise ValueError(
                 "Only subscript/slices with numbers allowed, not: %r" % expr.slice.value)
@@ -305,17 +331,20 @@ class ExpressionString(ast.NodeVisitor):
         self.indent = 0
     def visit_UnaryOp(self, node):
         if isinstance(node.op, ast.USub):
-            if isinstance(node.operand, (ast.Name, ast.Num)):
+            if isinstance(node.operand, (ast.Name, ast.Num, _ast.Name)):
                 return "-{}".format(self.visit(node.operand))  # prettier
             else:
                 return "-({})".format(self.visit(node.operand))
-        if isinstance(node.op, ast.Invert):
-            if isinstance(node.operand, (ast.Name, ast.Num)):
+        elif isinstance(node.op, ast.UAdd):
+            if isinstance(node.operand, (ast.Name, ast.Num, _ast.Name)):
+                return "+{}".format(self.visit(node.operand))  # prettier
+            else:
+                return "+({})".format(self.visit(node.operand))
+        elif isinstance(node.op, ast.Invert):
+            if isinstance(node.operand, (ast.Name, ast.Num, _ast.Name)):
                 return "~{}".format(self.visit(node.operand))  # prettier
             else:
                 return "~({})".format(self.visit(node.operand))
-        # elif isinstance(node.op, ast.UAdd):
-        #     return "{}".format(self.visit(self.operatand))
         else:
             raise ValueError('Unary op not supported: {}'.format(node.op))
 
@@ -330,6 +359,14 @@ class ExpressionString(ast.NodeVisitor):
 
     def visit_NameConstant(self, node):
         return repr(node.value)
+
+    def visit_Dict(self, node):
+        parts = []
+        for key, value in zip(node.keys, node.values):
+            key = self.visit(key)
+            value = self.visit(value)
+            parts.append(f'{key}: {value}')
+        return '{' + ' '.join(parts) + '}'
 
     def visit_Call(self, node):
         args = [self.visit(k) for k in node.args]
@@ -355,26 +392,38 @@ class ExpressionString(ast.NodeVisitor):
         try:
             if isinstance(node.op, ast.Mult):
                 return "({left} * {right})".format(left=left, right=right)
-            if isinstance(node.op, ast.Div):
+            elif isinstance(node.op, ast.MatMult):
+                return "({left} @ {right})".format(left=left, right=right)
+            elif isinstance(node.op, ast.Div):
                 return "({left} / {right})".format(left=left, right=right)
-            if isinstance(node.op, ast.Add):
+            elif isinstance(node.op, ast.Mod):
+                return "({left} % {right})".format(left=left, right=right)
+            elif isinstance(node.op, ast.FloorDiv):
+                return "({left} // {right})".format(left=left, right=right)
+            elif isinstance(node.op, ast.Add):
                 return "({left} + {right})".format(left=left, right=right)
-            if isinstance(node.op, ast.Sub):
+            elif isinstance(node.op, ast.Sub):
                 return "({left} - {right})".format(left=left, right=right)
-            if isinstance(node.op, ast.Pow):
+            elif isinstance(node.op, ast.Pow):
                 return "({left} ** {right})".format(left=left, right=right)
-            if isinstance(node.op, ast.BitAnd):
+            elif isinstance(node.op, ast.BitAnd):
                 return "({left} & {right})".format(left=left, right=right)
-            if isinstance(node.op, ast.BitOr):
+            elif isinstance(node.op, ast.BitOr):
                 return "({left} | {right})".format(left=left, right=right)
-            if isinstance(node.op, ast.BitXor):
+            elif isinstance(node.op, ast.BitXor):
                 return "({left} ^ {right})".format(left=left, right=right)
+            elif isinstance(node.op, ast.RShift):
+                return "({left} >> {right})".format(left=left, right=right)
+            elif isinstance(node.op, ast.LShift):
+                return "({left} << {right})".format(left=left, right=right)
             else:
-                return "do_not_understand_expression"
+                raise ValueError(f'Do not know binary op {node.op}')
+                # return "do_not_understand_expression"
         finally:
             self.indent -= 1
 
-    op_translate = {ast.Lt: "<", ast.LtE: "<=", ast.Gt: ">", ast.GtE: ">=", ast.Eq: "==", ast.NotEq: "!="}
+    op_translate = {ast.Lt: "<", ast.LtE: "<=", ast.Gt: ">", ast.GtE: ">=", ast.Eq: "==", ast.NotEq: "!=",
+                    ast.IsNot: "is not", ast.Is: "is", ast.In: "in"}
     def visit_Compare(self, node):
         s = ""
         left = self.visit(node.left)
@@ -385,6 +434,10 @@ class ExpressionString(ast.NodeVisitor):
             left = right
         return s
 
+    def visit_Subscript(self, node):
+        p = self.visit(node.value)
+        v = self.visit(node.slice.value)
+        return f'{p}[{v}]'
 
 class SimplifyExpression(ast.NodeTransformer):
 
@@ -467,6 +520,16 @@ class NameCollector(ast.NodeTransformer):
         self.names[node.id].append(node)
         return node
 
+
+class SliceCollector(ast.NodeTransformer):
+    def __init__(self):
+        self.slices = collections.defaultdict(list)
+
+    def visit_Subscript(self, node):
+        if node.value.id == 'df' and isinstance(node.slice.value, ast.Str):
+            self.slices[node.slice.value.s].append(node)
+        return node
+
 class GraphBuiler(ast.NodeVisitor):
     def __init__(self):
         self.dependencies = []
@@ -541,6 +604,16 @@ def names(expression):
     return nc.names
 
 
+def slices(expression):
+    if isinstance(expression, str):
+        node = parse_expression(expression)
+    else:
+        node = expression
+    nc = SliceCollector()
+    nc.visit(node)
+    return nc.slices
+
+
 def parse_expression(expression_string):
     expr = ast.parse(expression_string).body[0]
     assert isinstance(expr, ast.Expr), "not an expression"
@@ -554,9 +627,3 @@ def node_to_string(node, pretty=False):
 def validate_func(name, function_set):
     if name.id not in function_set:
         raise NameError("function %r is not defined" % name.id)
-
-
-def validate_id(id):
-    for char in id:
-        if char not in valid_id_characters:
-            raise ValueError("invalid character %r in id %r" % (char, id))

@@ -26,7 +26,7 @@ def test_masked_array():
     sa = vaex.strings.StringArray(ar, mask)
     assert sa.tolist() == ['dog', 'dog', None, 'cat', None]
     assert sa.equals('cat').tolist() == [False, False, False, True, False]
-    assert sa.equals(sa).tolist() == [True, True, False, True, False]
+    assert sa.equals(sa).tolist() == [True, True, True, True, True]
 
 def test_string_array():
     ar = np.array(["aap", "noot", None, "mies"], dtype='object')
@@ -226,11 +226,6 @@ def test_arrow_basics():
     assert list(c.to_numpy()) == ["ap", "oot",  None, "ies"]
 
     assert sys.getrefcount(sl) == 2
-    c = sl.lower()
-    assert list(c.to_numpy()) == ["aap", "noot",  None, "mies"]
-
-    c = sl.upper()
-    assert list(c.to_numpy()) == ["AAP", "NOOT",  None, "MIES"]
 
     c = sl.count("a", False)
     assert c.tolist() == [2, 0, 0, 0]

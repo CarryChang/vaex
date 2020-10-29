@@ -2,17 +2,19 @@ __author__ = 'maartenbreddels'
 import os
 import sys
 import collections
-import numpy as np
 import logging
 import concurrent.futures
 import threading
+
+import numpy as np
+import pyarrow as pa
 
 import vaex
 import vaex.utils
 import vaex.execution
 import vaex.file.colfits
 import vaex.file.other
-from vaex.column import ColumnStringArrow, str_type, _to_string_sequence
+from vaex.column import ColumnStringArrow, _to_string_sequence
 
 
 max_length = int(1e5)
@@ -63,7 +65,7 @@ def _export(dataset_input, dataset_output, random_index_column, path, column_nam
     order_array_inverse = None
 
     # for strings we also need the inverse order_array, keep track of that
-    has_strings = any([dataset_input.dtype(k) == str_type for k in column_names])
+    has_strings = any([dataset_input.is_string(k) for k in column_names])
 
     if partial_shuffle:
         # if we only export a portion, we need to create the full length random_index array, and
@@ -133,6 +135,7 @@ def _export(dataset_input, dataset_output, random_index_column, path, column_nam
             futures.append(future)
 
     done = False
+    progress(0)
     while not done:
         done = True
         for future in futures:
@@ -162,13 +165,18 @@ def _export_column(dataset_input, dataset_output, column_name, shuffle, sort, se
         if 1:
             block_scope = dataset_input._block_scope(0, vaex.execution.buffer_size_default)
             to_array = dataset_output.columns[column_name]
-            dtype = dataset_input.dtype(column_name)
+            dtype = dataset_input.data_type(column_name, array_type='numpy')
+            is_string = vaex.array_types.is_string_type(dtype)
+            if is_string:
+                assert isinstance(to_array, pa.Array)  # we don't support chunked arrays here
+                # TODO legacy: we still use ColumnStringArrow to write, find a way to do this with arrow
+                to_array = ColumnStringArrow.from_arrow(to_array)
             if shuffle or sort:  # we need to create a in memory copy, otherwise we will do random writes which is VERY inefficient
                 to_array_disk = to_array
                 if np.ma.isMaskedArray(to_array):
                     to_array = np.empty_like(to_array_disk)
                 else:
-                    if dtype == str_type:
+                    if vaex.array_types.is_string_type(dtype):
                         # we create an empty column copy
                         to_array = to_array._zeros_like()
                     else:
@@ -176,19 +184,17 @@ def _export_column(dataset_input, dataset_output, column_name, shuffle, sort, se
             to_offset = 0  # we need this for selections
             to_offset_unselected = 0 # we need this for filtering
             count = len(dataset_input)# if not selection else dataset_input.length_unfiltered()
-            is_string = dtype == str_type
             # TODO: if no filter, selection or mask, we can choose the quick path for str
             string_byte_offset = 0
 
             for i1, i2 in vaex.utils.subdivide(count, max_length=max_length):
                 logger.debug("from %d to %d (total length: %d, output length: %d)", i1, i2, len(dataset_input), N)
-                values = dataset_input.evaluate(column_name, i1=i1, i2=i2, filtered=True, parallel=False, selection=selection)
+                values = dataset_input.evaluate(column_name, i1=i1, i2=i2, filtered=True, parallel=False, selection=selection, array_type='numpy')
                 no_values = len(values)
                 if no_values:
                     if is_string:
                         # for strings, we don't take sorting/shuffling into account when building the structure
                         to_column = to_array
-                        assert isinstance(to_column, ColumnStringArrow)
                         from_sequence = _to_string_sequence(values)
                         to_sequence = to_column.string_sequence.slice(to_offset, to_offset+no_values, string_byte_offset)
                         string_byte_offset += to_sequence.fill_from(from_sequence)
@@ -225,7 +231,7 @@ def _export_column(dataset_input, dataset_output, column_name, shuffle, sort, se
                 else:
                     to_column.indices[count] = string_byte_offset
             if shuffle or sort:  # write to disk in one go
-                if dtype == str_type:  # strings are sorted afterwards
+                if is_string:  # strings are sorted afterwards
                     view = to_array.string_sequence.lazy_index(order_array_inverse)
                     to_array_disk.string_sequence.fill_from(view)
                 else:
@@ -265,7 +271,7 @@ def export_fits(dataset, path, column_names=None, shuffle=False, selection=False
             column = dataset.columns[column_name]
             shape = (N,) + column.shape[1:]
             dtype = column.dtype
-            if dataset.dtype(column_name) == str_type:
+            if dataset.is_string(column_name):
                 max_length = dataset[column_name].apply(lambda x: len(x)).max(selection=selection)
                 dtype = np.dtype('S'+str(int(max_length)))
         else:
@@ -286,17 +292,18 @@ def export_fits(dataset, path, column_names=None, shuffle=False, selection=False
         random_index_name = None
 
     # TODO: all expressions can have missing values.. how to support that?
-    null_values = {key: dataset.columns[key].fill_value for key in dataset.get_column_names() if dataset.is_masked(key) and dataset.dtype(key).kind != "f"}
+    null_values = {key: dataset.columns[key].fill_value for key in dataset.get_column_names() if dataset.is_masked(key) and dataset.data_type(key).kind != "f"}
     vaex.file.colfits.empty(path, N, column_names, data_types, data_shapes, ucds, units, null_values=null_values)
     if shuffle:
         del column_names[-1]
         del data_types[-1]
         del data_shapes[-1]
     dataset_output = vaex.file.other.FitsBinTable(path, write=True)
-    _export(dataset_input=dataset, dataset_output=dataset_output, path=path, random_index_column=random_index_name,
+    df_output = vaex.dataframe.DataFrameLocal(dataset_output)
+    _export(dataset_input=dataset, dataset_output=df_output, path=path, random_index_column=random_index_name,
             column_names=column_names, selection=selection, shuffle=shuffle,
             progress=progress, sort=sort, ascending=ascending)
-    dataset_output.close_files()
+    dataset_output.close()
 
 
 def export_hdf5_v1(dataset, path, column_names=None, byteorder="=", shuffle=False, selection=False, progress=None, virtual=True):
@@ -365,6 +372,7 @@ def main(argv):
             if not args.quiet:
                 print("generating soneira peebles dataset...")
             dataset = vaex.file.other.SoneiraPeebles(args.dimension, 2, args.max_level, args.lambdas)
+            dataset = vaex.dataframe.DataFrameLocal(dataset)
         else:
             return 1
     if args.task == "tap":
@@ -474,7 +482,7 @@ def main(argv):
             if output_ext == ".hdf5":
                 export_hdf5(dataset, args.output, column_names=columns, progress=update, shuffle=args.shuffle, sort=args.sort, selection=selection)
             elif output_ext == ".arrow":
-                from vaex_arrow.export import export as export_arrow
+                from vaex.arrow.export import export as export_arrow
                 export_arrow(dataset, args.output, column_names=columns, progress=update, shuffle=args.shuffle, sort=args.sort, selection=selection)
             elif output_ext == ".fits":
                 export_fits(dataset, args.output, column_names=columns, progress=update, shuffle=args.shuffle, sort=args.sort, selection=selection)
@@ -482,5 +490,5 @@ def main(argv):
                 progressbar.finish()
             if not args.quiet:
                 print("\noutput to %s" % os.path.abspath(args.output))
-            dataset.close_files()
+            dataset.close()
     return 0

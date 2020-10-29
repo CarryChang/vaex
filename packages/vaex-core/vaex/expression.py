@@ -1,4 +1,5 @@
 import ast
+import os
 import base64
 import cloudpickle as pickle
 import functools
@@ -10,9 +11,10 @@ import weakref
 from future.utils import with_metaclass
 import numpy as np
 import tabulate
+import pyarrow as pa
 
 from vaex.utils import _ensure_strings_from_expressions, _ensure_string_from_expression
-from vaex.column import ColumnString, _to_string_sequence, str_type
+from vaex.column import ColumnString, _to_string_sequence
 from .hash import counter_type_from_dtype
 import vaex.serialize
 from . import expresso
@@ -92,13 +94,13 @@ class Meta(type):
                     self = a
                     # print(op, a, b)
                     try:
-                        stringy = isinstance(b, str_type) or (isinstance(b, Expression) and b.dtype == str_type)
+                        stringy = isinstance(b, str) or b.is_string()
                     except:
                         # this can happen when expression is a literal, like '1' (used in propagate_unc)
                         # which causes the dtype to fail
                         stringy = False
                     if stringy:
-                        if isinstance(b, str_type):
+                        if isinstance(b, str):
                             b = repr(b)
                         if op['code'] == '==':
                             expression = 'str_equals({0}, {1})'.format(a.expression, b)
@@ -231,6 +233,10 @@ class Expression(with_metaclass(Meta)):
         return self._ast_names
 
     @property
+    def _ast_slices(self):
+        return expresso.slices(self.ast)
+
+    @property
     def expression(self):
         if self._expression is None:
             self._expression = expresso.node_to_string(self.ast)
@@ -243,6 +249,27 @@ class Expression(with_metaclass(Meta)):
             self._expression = value
             self._ast = None
 
+    def __bool__(self):
+        """Cast expression to boolean. Only supports (<expr1> == <expr2> and <expr1> != <expr2>)
+
+        The main use case for this is to support assigning to traitlets. e.g.:
+
+        >>> bool(expr1 == expr2)
+
+        This will return True when expr1 and expr2 are exactly the same (in string representation). And similarly for:
+
+        >>> bool(expr != expr2)
+
+        All other cases will return True.
+        """
+        # this is to make traitlets detect changes
+        import _ast
+        if isinstance(self.ast, _ast.Compare) and len(self.ast.ops) == 1 and isinstance(self.ast.ops[0], _ast.Eq):
+            return expresso.node_to_string(self.ast.left) == expresso.node_to_string(self.ast.comparators[0])
+        if isinstance(self.ast, _ast.Compare) and len(self.ast.ops) == 1 and isinstance(self.ast.ops[0], _ast.NotEq):
+            return expresso.node_to_string(self.ast.left) != expresso.node_to_string(self.ast.comparators[0])
+        return True
+
 
     @property
     def df(self):
@@ -251,18 +278,28 @@ class Expression(with_metaclass(Meta)):
 
     @property
     def dtype(self):
-        return self.ds.dtype(self.expression)
+        return self.df.data_type(self.expression, array_type='numpy')
+
+    def data_type(self, array_type=None):
+        return self.df.data_type(self.expression, array_type=array_type)
 
     @property
     def shape(self):
         return self.df._shape_of(self)
 
-    def to_numpy(self):
+    def to_arrow(self, convert_to_native=False):
+        '''Convert to Apache Arrow array (will byteswap/copy if convert_to_native=True).'''
+        values = self.values
+        return vaex.array_types.to_arrow(values, convert_to_native=convert_to_native)
+
+    def __arrow_array__(self, type=None):
+        values = self.to_arrow()
+        return pa.array(values, type=type)
+
+    def to_numpy(self, strict=True):
         """Return a numpy representation of the data"""
         values = self.values
-        if hasattr(values, 'to_numpy'):  # e.g. ColumnString
-            values = values.to_numpy()
-        return values
+        return vaex.array_types.to_numpy(values, strict=strict)
 
     def to_dask_array(self, chunks="auto"):
         import dask.array as da
@@ -358,12 +395,25 @@ class Expression(with_metaclass(Meta)):
                 if (include_virtual and (varname != self.expression)) or (varname == self.expression and ourself):
                     variables.add(varname)
                 if expand_virtual:
-                    expresso.translate(self.ds.virtual_columns[varname], record)
+                    variables.update(self.df[self.df.virtual_columns[varname]].variables(ourself=include_virtual, include_virtual=include_virtual))
             # we usually don't want to record ourself
             elif varname != self.expression or ourself:
                 variables.add(varname)
 
         expresso.translate(self.ast, record)
+        # df is a buildin, don't record it, if df is a column name, it will be collected as
+        # df['df']
+        variables -= {'df'}
+        for varname in self._ast_slices:
+            if varname in self.df.virtual_columns and varname not in variables:
+                if (include_virtual and (f"df['{varname}']" != self.expression)) or (f"df['{varname}']" == self.expression and ourself):
+                    variables.add(varname)
+                if expand_virtual:
+                    if varname in self.df.virtual_columns:
+                        variables |= self.df[self.df.virtual_columns[varname]].variables(ourself=include_virtual, include_virtual=include_virtual)
+            elif f"df['{varname}']" != self.expression or ourself:
+                variables.add(varname)
+
         return variables
 
     def _graph(self):
@@ -426,12 +476,16 @@ class Expression(with_metaclass(Meta)):
     #     '''
     #     return self.ds.evaluate(self)
 
-    def tolist(self):
+    def tolist(self, i1=None, i2=None):
         '''Short for expr.evaluate().tolist()'''
-        return self.evaluate().tolist()
+        values = self.evaluate(i1=i1, i2=i2)
+        if isinstance(values, (pa.Array, pa.ChunkedArray)):
+            return values.to_pylist()
+        return values.tolist()
 
-    def __repr__(self):
-        return self._repr_plain_()
+    if not os.environ.get('VAEX_DEBUG', ''):
+        def __repr__(self):
+            return self._repr_plain_()
 
     def _repr_plain_(self):
         from .formatting import _format_value
@@ -461,9 +515,7 @@ class Expression(with_metaclass(Meta)):
         if len(expression) > 60:
             expression = expression[:57] + '...'
         info = 'Expression = ' + expression + '\n'
-        str_type = str
         dtype = self.dtype
-        dtype = (str(dtype) if dtype != str_type else 'str')
         if self.expression in self.ds.get_column_names(hidden=True):
             state = "column"
         elif self.expression in self.ds.get_column_names(hidden=True):
@@ -560,21 +612,21 @@ class Expression(with_metaclass(Meta)):
         :returns: Pandas series containing the counts
         """
         from pandas import Series
-        dtype = self.dtype
+        data_type = self.data_type()
 
         transient = self.transient or self.ds.filtered or self.ds.is_masked(self.expression)
-        if self.dtype == str_type and not transient:
+        if self.is_string() and not transient:
             # string is a special case, only ColumnString are not transient
             ar = self.ds.columns[self.expression]
             if not isinstance(ar, ColumnString):
                 transient = True
 
-        counter_type = counter_type_from_dtype(self.dtype, transient)
+        counter_type = counter_type_from_dtype(data_type, transient)
         counters = [None] * self.ds.executor.thread_pool.nthreads
         def map(thread_index, i1, i2, ar):
             if counters[thread_index] is None:
                 counters[thread_index] = counter_type()
-            if dtype == str_type:
+            if vaex.array_types.is_string_type(data_type):
                 previous_ar = ar
                 ar = _to_string_sequence(ar)
                 if not transient:
@@ -664,8 +716,8 @@ class Expression(with_metaclass(Meta)):
         """Returns the number of missing values in the expression."""
         return self.ismissing().astype('int').sum().item()  # so the output is int, not array
 
-    def evaluate(self, i1=None, i2=None, out=None, selection=None, parallel=True):
-        return self.ds.evaluate(self, i1, i2, out=out, selection=selection, parallel=parallel)
+    def evaluate(self, i1=None, i2=None, out=None, selection=None, parallel=True, array_type=None):
+        return self.ds.evaluate(self, i1, i2, out=out, selection=selection, array_type=array_type, parallel=parallel)
 
     # TODO: it is not so elegant we need to have a custom version of this
     # it now also misses the docstring, reconsider how the the meta class auto
@@ -705,7 +757,7 @@ class Expression(with_metaclass(Meta)):
             all_vars = self.ds.get_column_names(virtual=True, strings=True, hidden=True) + list(self.ds.variables.keys())
             vaex.expresso.validate_expression(expression, all_vars, funcs, names)
             names = list(set(names))
-            types = ", ".join(str(self.ds.dtype(name)) + "[]" for name in names)
+            types = ", ".join(str(self.ds.data_type(name)) + "[]" for name in names)
             argstring = ", ".join(names)
             code = '''
 from numpy import *
@@ -735,27 +787,39 @@ def f({0}):
             for node in expression.ast_names[old]:
                 node.id = new
             expression._ast_names[new] = expression._ast_names.pop(old)
-            expression._expression = None  # resets the cached string representation
+        slices = expression._ast_slices
+        if old in slices:
+            for node in slices[old]:
+                node.slice.value.s = new
+        expression._expression = None  # resets the cached string representation
         return expression
 
-    def astype(self, dtype):
-        if dtype == str:
+    def astype(self, data_type):
+        if vaex.array_types.is_string_type(data_type) or data_type == str:
             return self.ds.func.astype(self, 'str')
         else:
-            return self.ds.func.astype(self, str(dtype))
+            return self.ds.func.astype(self, str(data_type))
 
-    def isin(self, values):
+    def isin(self, values, use_hashmap=True):
         """Lazily tests if each value in the expression is present in values.
 
         :param values: List/array of values to check
+        :param use_hashmap: use a hashmap or not (especially faster when values contains many elements)
         :return: :class:`Expression` with the lazy expression.
         """
-        if self.dtype == str_type:
-            values = vaex.column._to_string_sequence(values)
+        if use_hashmap:
+            # easiest way to create a set is using the vaex dataframe
+            df_values = vaex.from_arrays(x=values)
+            ordered_set = df_values._set(df_values.x)
+            var = self.df.add_variable('var_isin_ordered_set', ordered_set, unique=True)
+            return self.df['isin_set(%s, %s)' % (self, var)]
         else:
-            values = np.array(values, dtype=self.dtype)
-        var = self.df.add_variable('isin_values', values, unique=True)
-        return self.df['isin(%s, %s)' % (self, var)]
+            if self.is_string():
+                values = vaex.column._to_string_sequence(values)
+            else:
+                values = np.array(values, dtype=self.dtype)
+            var = self.df.add_variable('isin_values', values, unique=True)
+            return self.df['isin(%s, %s)' % (self, var)]
 
     def apply(self, f):
         """Apply a function along all values of an Expression.
@@ -889,6 +953,8 @@ def f({0}):
         use_masked_array = False
         if default_value is not None:
             allow_missing = True
+        if allow_missing:
+            use_masked_array = True
         if not set(mapper_keys).issuperset(found_keys):
             missing = set(found_keys).difference(mapper_keys)
             missing0 = list(missing)[0]
@@ -897,8 +963,6 @@ def f({0}):
                 if default_value is not None:
                     value0 = list(mapper.values())[0]
                     assert np.issubdtype(type(default_value), np.array(value0).dtype), "default value has to be of similar type"
-                else:
-                    use_masked_array = True
             else:
                 if only_has_nan:
                     pass  # we're good, the hash mapper deals with nan
@@ -937,6 +1001,8 @@ def f({0}):
     def is_masked(self):
         return self.ds.is_masked(self.expression)
 
+    def is_string(self):
+        return self.df.is_string(self.expression)
 
 class FunctionSerializable(object):
     pass
@@ -1029,7 +1095,7 @@ class FunctionSerializableJit(FunctionSerializable):
         # TODO: can we do the above using the Expressio API?s
 
         arguments = list(set(names))
-        argument_dtypes = [df.dtype(argument) for argument in arguments]
+        argument_dtypes = [df.data_type(argument, array_type='numpy') for argument in arguments]
         return_dtype = df[expression].dtype
         return cls(str(expression), arguments, argument_dtypes, return_dtype, verbose, compile=compile)
 
@@ -1080,6 +1146,7 @@ def f({0}):
         exec(code, scope)
         func = scope['f']
         def wrapper(*args):
+            args = [vaex.array_types.to_numpy(k) for k in args]
             args = [vaex.utils.to_native_array(arg) if isinstance(arg, np.ndarray) else arg for arg in args]
             args = [cupy.asarray(arg) if isinstance(arg, np.ndarray) else arg for arg in args]
             return cupy.asnumpy(func(*args))
@@ -1101,6 +1168,7 @@ class FunctionToScalar(FunctionSerializablePickle):
                 return v.decode('utf8')
             else:
                 return v
+        args = [vaex.array_types.tolist(k) for k in args]
         for i in range(length):
             scalar_result = self.f(*[fix_type(k[i]) for k in args], **{key: value[i] for key, value in kwargs.items()})
             result.append(scalar_result)

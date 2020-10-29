@@ -10,7 +10,7 @@ import vaex.utils
 import vaex.execution
 import vaex.export
 import vaex.hdf5.dataset
-from vaex.column import ColumnStringArrow, str_type
+from vaex.column import ColumnStringArrow
 
 max_length = int(1e5)
 
@@ -57,7 +57,7 @@ def export_hdf5_v1(dataset, path, column_names=None, byteorder="=", shuffle=Fals
 
         logger.debug("exporting columns(hdf5): %r" % column_names)
         for column_name in column_names:
-            dtype = dataset.dtype(column_name)
+            dtype = dataset.data_type(column_name)
             if column_name in dataset.get_column_names(strings=True):
                 column = dataset.columns[column_name]
                 shape = (N,) + column.shape[1:]
@@ -101,7 +101,7 @@ def export_hdf5_v1(dataset, path, column_names=None, byteorder="=", shuffle=Fals
     dataset_output.description = description
     logger.debug("writing meta information")
     dataset_output.write_meta()
-    dataset_output.close_files()
+    dataset_output.close()
     return
 
 
@@ -147,14 +147,10 @@ def export_hdf5(dataset, path, column_names=None, byteorder="=", shuffle=False, 
                 sparse_groups[id(sparse_matrix)].append(column_name)
                 sparse_matrices[id(sparse_matrix)] = sparse_matrix
                 continue
-            dtype = dataset.dtype(column_name)
-            if column_name in dataset.get_column_names(virtual=False):
-                column = dataset.columns[column_name]
-                shape = (N,) + column.shape[1:]
-            else:
-                shape = (N,)
+            dtype = dataset.data_type(column_name, array_type='numpy')
+            shape = (N, ) + dataset._shape_of(column_name)[1:]
             h5column_output = h5columns_output.require_group(column_name)
-            if dtype == str_type:
+            if vaex.array_types.is_string_type(dtype):
                 # TODO: if no selection or filter, we could do this
                 # if isinstance(column, ColumnStringArrow):
                 #     data_shape = column.bytes.shape
@@ -206,7 +202,7 @@ def export_hdf5(dataset, path, column_names=None, byteorder="=", shuffle=False, 
                 array[0] = array[0]  # make sure the array really exists
 
                 data = dataset.evaluate(column_name, 0, 1, parallel=False)
-                if np.ma.isMaskedArray(data):
+                if dataset.is_masked(column_name):
                     mask = h5column_output.require_dataset('mask', shape=shape, dtype=np.bool)
                     mask[0] = mask[0]  # make sure the array really exists
         random_index_name = None
@@ -241,21 +237,24 @@ def export_hdf5(dataset, path, column_names=None, byteorder="=", shuffle=False, 
 
     # after this the file is closed,, and reopen it using out class
     dataset_output = vaex.hdf5.dataset.Hdf5MemoryMapped(path, write=True)
+    df_output = vaex.dataframe.DataFrameLocal(dataset_output)
 
-    column_names = vaex.export._export(dataset_input=dataset, dataset_output=dataset_output, path=path, random_index_column=random_index_name,
+    column_names = vaex.export._export(dataset_input=dataset, dataset_output=df_output, path=path, random_index_column=random_index_name,
                                        column_names=column_names, selection=selection, shuffle=shuffle, byteorder=byteorder,
                                        progress=progress, sort=sort, ascending=ascending)
-    import getpass
-    import datetime
-    user = getpass.getuser()
-    date = str(datetime.datetime.now())
-    source = dataset.path
-    description = "file exported by vaex, by user %s, on date %s, from source %s" % (user, date, source)
-    if dataset.description:
-        description += "previous description:\n" + dataset.description
-    dataset_output.copy_metadata(dataset)
-    dataset_output.description = description
-    logger.debug("writing meta information")
-    dataset_output.write_meta()
-    dataset_output.close_files()
+    dataset_output._freeze()
+    # We aren't really making use of the metadata, we could put this back in some form in the future
+    # import getpass
+    # import datetime
+    # user = getpass.getuser()
+    # date = str(datetime.datetime.now())
+    # source = dataset.path
+    # description = "file exported by vaex, by user %s, on date %s, from source %s" % (user, date, source)
+    # if dataset.description:
+    #     description += "previous description:\n" + dataset.description
+    # dataset_output.copy_metadata(dataset)
+    # dataset_output.description = description
+    # logger.debug("writing meta information")
+    # dataset_output.write_meta()
+    dataset_output.close()
     return

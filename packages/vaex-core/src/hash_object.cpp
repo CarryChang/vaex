@@ -60,7 +60,7 @@ public:
         PyObject** array = (PyObject**)info.ptr;
         for(int64_t i = 0; i < length; i++) {
             value_type value = array[i];
-            if(PyFloat_Check(value) && isnan(PyFloat_AsDouble(value))) {
+            if(PyFloat_Check(value) && std::isnan(PyFloat_AsDouble(value))) {
                 nan_count++;
             } else {
                 auto search = map.find(value);
@@ -87,7 +87,7 @@ public:
             value_type value = array[i];
             if(m[i]) {
                 null_count++;
-            } else if(PyFloat_Check(value) && isnan(PyFloat_AsDouble(value))) {
+            } else if(PyFloat_Check(value) && std::isnan(PyFloat_AsDouble(value))) {
                 nan_count++;
             } else {
                 auto search = map.find(value);
@@ -160,6 +160,34 @@ class ordered_set : public hash_base<ordered_set<T>, T, T> {
 public:
     using typename hash_base<ordered_set<T>, T, T>::value_type;
     using typename hash_base<ordered_set<T>,T, T>::storage_type;
+    py::array_t<bool> isin(py::buffer object_array) {
+        py::buffer_info info = object_array.request();
+        if(info.ndim != 1) {
+            throw std::runtime_error("Expected a 1d byte buffer");
+        }
+        int64_t size = info.shape[0];
+        PyObject** array = (PyObject**)info.ptr;
+
+        // TODO: check dtype/format
+
+        py::array_t<bool> result(size);
+        auto output = result.template mutable_unchecked<1>();
+        for(int64_t i = 0; i < size; i++) {
+            value_type value = array[i];
+            if(PyFloat_Check(value) && std::isnan(PyFloat_AsDouble(value))) {
+                output(i) = this->nan_count > 0;
+            } else {
+                auto search = this->map.find(value);
+                auto end = this->map.end();
+                if(search == end) {
+                    output(i) = false;
+                } else {
+                    output(i) = true;
+                }
+            }
+        }
+        return result;
+    }
     py::array_t<int64_t> map_ordinal(py::buffer object_array) {
         py::buffer_info info = object_array.request();
         if(info.ndim != 1) {
@@ -177,7 +205,7 @@ public:
         int64_t offset = (this->null_count > 0 ? 1 : 0) + (this->nan_count > 0 ? 1 : 0);
         for(int64_t i = 0; i < size; i++) {
             value_type value = array[i];
-            if(PyFloat_Check(value) && isnan(PyFloat_AsDouble(value))) {
+            if(PyFloat_Check(value) && std::isnan(PyFloat_AsDouble(value))) {
                 output(i) = 0;
             } else {
                 auto search = this->map.find(value);
@@ -209,7 +237,7 @@ public:
             value_type value = array[i];
             if(m[i]) {
                 output(i) = offset;
-            } else if(PyFloat_Check(value) && isnan(PyFloat_AsDouble(value))) {
+            } else if(PyFloat_Check(value) && std::isnan(PyFloat_AsDouble(value))) {
                 output(i) = 0;
             } else {
                 auto search = this->map.find(value);
@@ -278,6 +306,7 @@ void init_hash_object(py::module &m) {
         typedef ordered_set<> Type;
         py::class_<Type>(m, ordered_setname.c_str())
             .def(py::init<>())
+            .def("isin", &Type::isin)
             .def("update", &Type::update)
             .def("update", &Type::update_with_mask)
             .def("merge", &Type::merge)

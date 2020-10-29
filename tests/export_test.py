@@ -2,9 +2,11 @@ from common import *
 import os
 import tempfile
 import pandas as pd
+import platform
 
 
-@pytest.mark.parametrize("filename", ["test.hdf5", "test.arrow", "test.parquet"])
+@pytest.mark.skipif(platform.system().lower() == 'windows', reason="access violation?")
+@pytest.mark.parametrize("filename", ["test.hdf5", "test.arrow", "test.parquet", "test.csv"])
 def test_export_empty_string(tmpdir, filename):
     path = str(tmpdir.join(filename))
     s = np.array(["", ""])
@@ -13,22 +15,25 @@ def test_export_empty_string(tmpdir, filename):
     df = vaex.open(path)
     repr(df)
 
-
 def test_export(ds_local, tmpdir):
     ds = ds_local
     # TODO: we eventually want to support dtype=object, but not for hdf5
-    ds = ds.drop(ds.obj)
+    if 'obj' in ds:  # df_arrow does not have it
+        ds = ds.drop(ds.obj)
     path = str(tmpdir.join('test.hdf5'))
     ds.export_hdf5(path)
     ds = ds.sample(5)
     path = str(tmpdir.join('sample.hdf5'))
     ds.export_hdf5(path)
 
-    ds = ds.drop(ds.timedelta)
+    if 'timedelta' in ds:  # df_arrow does not have it
+        ds = ds.drop(ds.timedelta)
 
-    path = str(tmpdir.join('sample.parquet'))
-    ds.export(path)
-    df = vaex.open(path)
+    if platform.system().lower() != 'windows':
+        path = str(tmpdir.join('sample.parquet'))
+        ds['datetime'] = ds.datetime.astype('datetime64[ms]')
+        ds.export(path)
+        df = vaex.open(path)
 
 def test_export_open_hdf5(ds_local):
     ds = ds_local
@@ -38,11 +43,20 @@ def test_export_open_hdf5(ds_local):
     ds_opened = vaex.open(filename)
     assert list(ds) == list(ds_opened)
 
+def test_export_open_csv(ds_local, tmpdir):
+    df = ds_local
+    path = str(tmpdir.join('test.csv'))
+    df.export_csv(path, chunk_size=3, virtual=True)
+    df_opened = vaex.from_csv(path)
+    assert list(df) == list(df_opened)
+    assert df.shape == df_opened.shape
 
 def test_export_open_hdf5(ds_local):
     ds = ds_local
-    ds = ds.drop(ds.obj)
-    ds = ds.drop(ds.timedelta)
+    if 'obj' in ds:  # df_arrow does not have it
+        ds = ds.drop(ds.obj)
+    if 'timedelta' in ds:  # df_arrow does not have it
+        ds = ds.drop(ds.timedelta)
     ds = ds.drop(ds.z)
     filename = tempfile.mktemp(suffix='.arrow')
     ds.export(filename)
@@ -88,8 +102,8 @@ def test_multi_file_naive_read_convert_export(tmpdir, dtypes):
     pdf1 = pd.read_csv(current_dir + path1, dtype=dtypes)
     pdf2 = pd.read_csv(current_dir + path2, dtype=dtypes)
 
-    vdf1 = vaex.from_pandas(pdf1, copy_index=False)
-    vdf2 = vaex.from_pandas(pdf2, copy_index=False)
+    vdf1 = vaex.from_pandas(pdf1)
+    vdf2 = vaex.from_pandas(pdf2)
 
     magic_value = 1234
     # Verify the Int64 type from pandas is read in vaex correctly
@@ -110,4 +124,11 @@ def test_multi_file_naive_read_convert_export(tmpdir, dtypes):
     df_verify = vaex.open(output_path_final)
     assert len(df) == len(df_verify)
     assert df['name'].tolist() == df_verify['name'].tolist()
-    assert df['age'].fillnan(magic_value).tolist() == df_verify['age'].fillnan(magic_value).tolist()
+    assert df['age'].fillna(magic_value).tolist() == df_verify['age'].fillna(magic_value).tolist()
+
+def test_export_csv(df_local, tmpdir):
+    df = df_local
+    path = str(tmpdir.join('test.csv'))
+    df.export_csv(path)
+
+    assert '123456' in vaex.open(path)
